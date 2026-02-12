@@ -2012,6 +2012,19 @@ bool CodeEdit::is_line_code_region_end(int p_line) const {
 	return split.size() > 0 && split[0] == code_region_end_string;
 }
 
+/* Whenline gutter */
+void CodeEdit::set_draw_whenline_gutter(bool p_draw) {
+	set_gutter_draw(whenline_gutter, p_draw);
+}
+
+bool CodeEdit::is_drawing_whenline_gutter() const {
+	return is_gutter_drawn(whenline_gutter);
+}
+
+void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_region) {
+	draw_rect(p_region, theme_cache.code_folding_color);
+}
+
 /* Delimiters */
 // Strings
 void CodeEdit::add_string_delimiter(const String &p_start_key, const String &p_end_key, bool p_line_only) {
@@ -3953,6 +3966,15 @@ CodeEdit::CodeEdit() {
 	set_gutter_draw(gutter_idx, false);
 	set_gutter_type(gutter_idx, GUTTER_TYPE_CUSTOM);
 	set_gutter_custom_draw(gutter_idx, callable_mp(this, &CodeEdit::_fold_gutter_draw_callback));
+	gutter_idx++;
+
+
+	/* Whenline Gutter */
+	add_gutter();
+	set_gutter_name(gutter_idx, "whenline_gutter");
+	set_gutter_draw(gutter_idx, true);
+	set_gutter_type(gutter_idx, GUTTER_TYPE_CUSTOM);
+	set_gutter_custom_draw(gutter_idx, callable_mp(this, &CodeEdit::_whenline_gutter_draw_callback));
 	gutter_idx++;
 
 	/* Symbol tooltip */

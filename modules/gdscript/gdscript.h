@@ -109,6 +109,8 @@ class GDScript : public Script {
 	HashMap<StringName, MethodInfo> _signals;
 	Dictionary rpc_config;
 
+	HashMap<StringName, int> call_counts;
+
 public:
 	struct LambdaInfo {
 		int capture_count;

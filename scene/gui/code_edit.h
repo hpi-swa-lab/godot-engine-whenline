@@ -136,6 +136,11 @@ private:
 	bool _fold_line(int p_line);
 	bool _unfold_line(int p_line);
 
+	/* Whenline Gutter */
+	int whenline_gutter = -1;
+	bool draw_whenline_gutter = true;
+	void _whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_region);
+
 	/* Delimiters */
 	enum DelimiterType {
 		TYPE_STRING,
@@ -446,6 +451,10 @@ public:
 	void set_code_region_tags(const String &p_start = "region", const String &p_end = "endregion");
 	bool is_line_code_region_start(int p_line) const;
 	bool is_line_code_region_end(int p_line) const;
+
+	/* Whenline Gutter */
+	void set_draw_whenline_gutter(bool p_draw);
+	bool is_drawing_whenline_gutter() const;
 
 	/* Delimiters */
 	void add_string_delimiter(const String &p_start_key, const String &p_end_key, bool p_line_only = false);

@@ -105,6 +105,7 @@ Object *GDScriptNativeClass::instantiate() {
 }
 
 Variant GDScriptNativeClass::callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
+	print_line("GDScriptNativeClass::callp: " + String(name) + " " + String(p_method));
 	if (p_method == SNAME("new")) {
 		// Constructor.
 		return Object::callp(p_method, p_args, p_argcount, r_error);
@@ -928,6 +929,7 @@ const Variant GDScript::get_rpc_config() const {
 }
 
 Variant GDScript::callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
+	print_line("GDScript::callp: " + String(path) + " " + String(p_method));
 	GDScript *top = this;
 	while (top) {
 		if (likely(top->valid)) {
@@ -1894,6 +1896,14 @@ void GDScriptInstance::_call_implicit_ready_recursively(GDScript *p_script) {
 
 Variant GDScriptInstance::callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
 	GDScript *sptr = script.ptr();
+	if (!script->call_counts.has(p_method)) {
+		script->call_counts[p_method] = 0;
+	}
+	script->call_counts[p_method]++;
+	print_line("GDScriptInstance::callp: " + String(script->path) + " " + String(p_method));
+	for (const KeyValue<StringName, int> &E : sptr->call_counts) {
+		print_line("So far, " + String(E.key) + " has a call count of:", E.value);
+	}
 	if (unlikely(p_method == SceneStringName(_ready))) {
 		// Call implicit ready first, including for the super classes recursively.
 		_call_implicit_ready_recursively(sptr);
