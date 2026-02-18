@@ -1096,10 +1096,6 @@ void Node::_remove_tree_from_process_thread_group() {
 }
 
 void Node::_add_tree_to_process_thread_group(Node *p_owner) {
-	if (_is_any_processing()) {
-		_add_to_process_thread_group();
-	}
-
 	data.process_thread_group_owner = p_owner;
 	if (p_owner != nullptr) {
 		data.process_group = p_owner->data.process_group;
@@ -1107,12 +1103,16 @@ void Node::_add_tree_to_process_thread_group(Node *p_owner) {
 		data.process_group = &data.tree->default_process_group;
 	}
 
+	if (_is_any_processing()) {
+		_add_to_process_thread_group();
+	}
+
 	for (KeyValue<StringName, Node *> &K : data.children) {
 		if (K.value->data.process_thread_group != PROCESS_THREAD_GROUP_INHERIT) {
 			continue;
 		}
 
-		K.value->_add_to_process_thread_group();
+		K.value->_add_tree_to_process_thread_group(p_owner);
 	}
 }
 bool Node::is_processing_internal() const {
@@ -2562,37 +2562,6 @@ String Node::get_tree_string() {
 	return _get_tree_string(this);
 }
 
-void Node::_propagate_reverse_notification(int p_notification) {
-	data.blocked++;
-
-	for (HashMap<StringName, Node *>::Iterator I = data.children.last(); I; --I) {
-		I->value->_propagate_reverse_notification(p_notification);
-	}
-
-	notification(p_notification, true);
-	data.blocked--;
-}
-
-void Node::_propagate_deferred_notification(int p_notification, bool p_reverse) {
-	ERR_FAIL_COND(!is_inside_tree());
-
-	data.blocked++;
-
-	if (!p_reverse) {
-		MessageQueue::get_singleton()->push_notification(this, p_notification);
-	}
-
-	for (KeyValue<StringName, Node *> &K : data.children) {
-		K.value->_propagate_deferred_notification(p_notification, p_reverse);
-	}
-
-	if (p_reverse) {
-		MessageQueue::get_singleton()->push_notification(this, p_notification);
-	}
-
-	data.blocked--;
-}
-
 void Node::propagate_notification(int p_notification) {
 	ERR_THREAD_GUARD
 	data.blocked++;
@@ -3211,7 +3180,7 @@ void Node::replace_by(RequiredParam<Node> rp_node, bool p_keep_groups) {
 	EXTRACT_PARAM_OR_FAIL(p_node, rp_node);
 	ERR_FAIL_COND(p_node->data.parent);
 
-	List<Node *> owned = data.owned;
+	List<Node *> owned(data.owned);
 	List<Node *> owned_by_owner;
 	Node *owner = (data.owner == this) ? p_node : data.owner;
 
