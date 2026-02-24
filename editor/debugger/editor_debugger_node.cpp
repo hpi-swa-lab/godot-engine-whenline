@@ -130,6 +130,7 @@ ScriptEditorDebugger *EditorDebuggerNode::_add_debugger() {
 	node->connect("set_breakpoint", callable_mp(this, &EditorDebuggerNode::_breakpoint_set_in_tree).bind(id));
 	node->connect("clear_breakpoints", callable_mp(this, &EditorDebuggerNode::_breakpoints_cleared_in_tree).bind(id));
 	node->connect("errors_cleared", callable_mp(this, &EditorDebuggerNode::_update_errors));
+	node->connect("whenline_data_updated", callable_mp(this, &EditorDebuggerNode::_whenline_data_updated).bind(id));
 
 	if (tabs->get_tab_count() > 0) {
 		get_debugger(0)->clear_style();
@@ -215,6 +216,10 @@ void EditorDebuggerNode::_text_editor_stack_clear(const ScriptEditorDebugger *p_
 	stack_script.unref(); // Why?!?
 }
 
+void EditorDebuggerNode::_whenline_data_updated(int p_debugger) {
+	emit_signal(SNAME("whenline_data_updated"), p_debugger);
+}
+
 void EditorDebuggerNode::_bind_methods() {
 	// LiveDebug.
 	ClassDB::bind_method("live_debug_create_node", &EditorDebuggerNode::live_debug_create_node);
@@ -232,6 +237,7 @@ void EditorDebuggerNode::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("breakpoint_toggled", PropertyInfo(Variant::STRING, "path"), PropertyInfo(Variant::INT, "line"), PropertyInfo(Variant::BOOL, "enabled")));
 	ADD_SIGNAL(MethodInfo("breakpoint_set_in_tree", PropertyInfo("script"), PropertyInfo(Variant::INT, "line"), PropertyInfo(Variant::BOOL, "enabled"), PropertyInfo(Variant::INT, "debugger")));
 	ADD_SIGNAL(MethodInfo("breakpoints_cleared_in_tree", PropertyInfo(Variant::INT, "debugger")));
+	ADD_SIGNAL(MethodInfo("whenline_data_updated", PropertyInfo(Variant::INT, "debugger")));
 }
 
 void EditorDebuggerNode::register_undo_redo(UndoRedo *p_undo_redo) {

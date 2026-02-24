@@ -109,8 +109,6 @@ class GDScript : public Script {
 	HashMap<StringName, MethodInfo> _signals;
 	Dictionary rpc_config;
 
-	HashMap<StringName, int> call_counts;
-
 public:
 	struct LambdaInfo {
 		int capture_count;
@@ -463,6 +461,18 @@ class GDScriptLanguage : public ScriptLanguage {
 	bool profile_native_calls;
 	uint64_t script_frame_time;
 #endif
+
+	// same as in debugger
+	struct WhenlineEntry {
+		uint64_t first_time_usec = 0;
+		uint64_t last_time_usec = 0;
+		uint64_t count = 0;
+	};
+	HashMap<StringName, HashMap<int, WhenlineEntry>> _whenline_pending;
+
+	void _whenline_record_line(const StringName &p_source, int p_line, uint64_t p_usec);
+	void _whenline_flush(); // call each frame
+	void _whenline_clear(); // call each session
 
 	HashMap<String, ObjectID> orphan_subclasses;
 

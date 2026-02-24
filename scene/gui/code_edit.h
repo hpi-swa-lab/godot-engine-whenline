@@ -455,6 +455,7 @@ public:
 	/* Whenline Gutter */
 	void set_draw_whenline_gutter(bool p_draw);
 	bool is_drawing_whenline_gutter() const;
+	int get_whenline_gutter_index() const { return whenline_gutter; }
 
 	/* Delimiters */
 	void add_string_delimiter(const String &p_start_key, const String &p_end_key, bool p_line_only = false);

@@ -105,7 +105,6 @@ Object *GDScriptNativeClass::instantiate() {
 }
 
 Variant GDScriptNativeClass::callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
-	print_line("GDScriptNativeClass::callp: " + String(name) + " " + String(p_method));
 	if (p_method == SNAME("new")) {
 		// Constructor.
 		return Object::callp(p_method, p_args, p_argcount, r_error);
@@ -929,7 +928,6 @@ const Variant GDScript::get_rpc_config() const {
 }
 
 Variant GDScript::callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
-	print_line("GDScript::callp: " + String(path) + " " + String(p_method));
 	GDScript *top = this;
 	while (top) {
 		if (likely(top->valid)) {
@@ -1896,14 +1894,6 @@ void GDScriptInstance::_call_implicit_ready_recursively(GDScript *p_script) {
 
 Variant GDScriptInstance::callp(const StringName &p_method, const Variant **p_args, int p_argcount, Callable::CallError &r_error) {
 	GDScript *sptr = script.ptr();
-	if (!script->call_counts.has(p_method)) {
-		script->call_counts[p_method] = 0;
-	}
-	script->call_counts[p_method]++;
-	print_line("GDScriptInstance::callp: " + String(script->path) + " " + String(p_method));
-	for (const KeyValue<StringName, int> &E : sptr->call_counts) {
-		print_line("So far, " + String(E.key) + " has a call count of:", E.value);
-	}
 	if (unlikely(p_method == SceneStringName(_ready))) {
 		// Call implicit ready first, including for the super classes recursively.
 		_call_implicit_ready_recursively(sptr);
@@ -2587,6 +2577,61 @@ void GDScriptLanguage::frame() {
 	}
 
 #endif
+
+	// This should also work in release with always_track_call_stacks so it is here
+	if (!_whenline_pending.is_empty() && EngineDebugger::is_active()) {
+		_whenline_flush();
+	}
+}
+
+void GDScriptLanguage::_whenline_record_line(const StringName &p_source, int p_line, uint64_t p_usec) {
+	// this can be called from any thread so its mutex time
+	MutexLock lock(mutex);
+	HashMap<int, WhenlineEntry> &script_map = _whenline_pending[p_source];
+	HashMap<int, WhenlineEntry>::Iterator it = script_map.find(p_line);
+	// create or update
+	if (it == script_map.end()) {
+		WhenlineEntry entry;
+		entry.first_time_usec = p_usec;
+		entry.last_time_usec = p_usec;
+		entry.count = 1;
+		script_map.insert(p_line, entry);
+	} else {
+		it->value.last_time_usec = p_usec;
+		it->value.count++;
+	}
+}
+
+void GDScriptLanguage::_whenline_flush() {
+	// send accumulated stats and start new recording
+	HashMap<StringName, HashMap<int, WhenlineEntry>> to_send;
+	{
+		MutexLock lock(mutex);
+		to_send = std::move(_whenline_pending);
+		_whenline_pending.clear();
+	}
+
+	if (to_send.is_empty()) {
+		return;
+	}
+
+	Array payload;
+	for (const KeyValue<StringName, HashMap<int, WhenlineEntry>> &script_kv : to_send) {
+		for (const KeyValue<int, WhenlineEntry> &line_kv : script_kv.value) {
+			payload.push_back(String(script_kv.key));             // script path (String)
+			payload.push_back(line_kv.key);                       // 1-based line number (int)
+			payload.push_back((int64_t)line_kv.value.first_time_usec);
+			payload.push_back((int64_t)line_kv.value.last_time_usec);
+			payload.push_back((int64_t)line_kv.value.count);
+		}
+	}
+
+	EngineDebugger::get_singleton()->send_message("gdscript:whenline_data", payload);
+}
+
+void GDScriptLanguage::_whenline_clear() {
+	MutexLock lock(mutex);
+	_whenline_pending.clear();
 }
 
 /* EDITOR FUNCTIONS */

@@ -34,6 +34,7 @@
 #include "core/config/project_settings.h"
 #include "core/input/input.h"
 #include "core/os/keyboard.h"
+#include "core/string/print_string.h"
 #include "core/string/string_builder.h"
 #include "core/string/translation_server.h"
 #include "core/string/ustring.h"
@@ -2022,7 +2023,33 @@ bool CodeEdit::is_drawing_whenline_gutter() const {
 }
 
 void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_region) {
-	draw_rect(p_region, theme_cache.code_folding_color);
+	// more calls = brighter
+
+	const Variant meta = get_line_gutter_metadata(p_line, p_gutter);
+	if (meta.get_type() != Variant::DICTIONARY) return;
+
+	const Dictionary d = meta;
+
+	const int64_t count = d.get("count", 0);
+	if (count <= 0) return;
+
+	Color base_color = Color(0.512, 0.836, 0.288, 1.0);
+
+	const float log_intensity = CLAMP(
+			(float)Math::log((double)(count + 1)) / (float)Math::log(64.0),
+			0.0f, 1.0f);
+	const float alpha = Math::lerp(0.35f, 0.90f, log_intensity);
+
+	base_color.a = alpha;
+
+	// fill square with margins
+	const float pad = MAX(1.0f, p_region.size.y * 0.08f);
+	Rect2 bar = p_region;
+	bar.position.y += pad;
+	bar.size.y -= pad * 2.0f;
+	bar.size.x = MAX(2.0f, p_region.size.x - 2.0f);
+
+	draw_rect(bar, base_color);
 }
 
 /* Delimiters */
@@ -3193,6 +3220,11 @@ void CodeEdit::_update_gutter_indexes() {
 
 		if (get_gutter_name(i) == "fold_gutter") {
 			fold_gutter = i;
+			continue;
+		}
+
+		if (get_gutter_name(i) == "whenline_gutter") {
+			whenline_gutter = i;
 			continue;
 		}
 	}

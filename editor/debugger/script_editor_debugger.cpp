@@ -33,6 +33,7 @@
 #include "core/config/project_settings.h"
 #include "core/debugger/debugger_marshalls.h"
 #include "core/debugger/remote_debugger.h"
+#include "core/string/print_string.h"
 #include "core/string/ustring.h"
 #include "core/version.h"
 #include "editor/debugger/editor_debugger_plugin.h"
@@ -975,6 +976,70 @@ void ScriptEditorDebugger::_msg_embed_next_frame(uint64_t p_thread_id, const Arr
 	emit_signal(SNAME("embed_shortcut_requested"), EMBED_NEXT_FRAME);
 }
 
+void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array &p_data) {
+	const int record_size = 5;
+	// so many macros...
+	ERR_FAIL_COND_MSG(p_data.size() % record_size != 0,
+			vformat("gdscript:whenline_data payload size %d is not a multiple of %d", p_data.size(), record_size));
+
+	bool changed = false;
+	for (int i = 0; i < p_data.size(); i += record_size) {
+		ERR_FAIL_COND(p_data[i].get_type() != Variant::STRING);
+		ERR_FAIL_COND(p_data[i + 1].get_type() != Variant::INT);
+
+		const String script_path = p_data[i];
+		const int line = p_data[i + 1];
+		const uint64_t incoming_first = (uint64_t)(int64_t)p_data[i + 2];
+		const uint64_t incoming_last = (uint64_t)(int64_t)p_data[i + 3];
+		const uint64_t incoming_count = (uint64_t)(int64_t)p_data[i + 4];
+
+		HashMap<int, WhenlineEditorEntry> &script_map = whenline_data[script_path];
+		HashMap<int, WhenlineEditorEntry>::Iterator it = script_map.find(line);
+		if (it == script_map.end()) {
+			WhenlineEditorEntry entry;
+			entry.first_time_usec = incoming_first;
+			entry.last_time_usec = incoming_last;
+			entry.count = incoming_count;
+			script_map.insert(line, entry);
+		} else {
+			// Keep the earliest first_time across all deltas.
+			if (incoming_first < it->value.first_time_usec) {
+				it->value.first_time_usec = incoming_first;
+			}
+			if (incoming_last > it->value.last_time_usec) {
+				it->value.last_time_usec = incoming_last;
+			}
+			it->value.count += incoming_count;
+		}
+		changed = true;
+	}
+
+	if (changed) {
+		emit_signal(SNAME("whenline_data_updated"));
+	}
+}
+
+void ScriptEditorDebugger::_whenline_clear_session_data() {
+	whenline_data.clear();
+	emit_signal(SNAME("whenline_data_updated"));
+}
+
+Dictionary ScriptEditorDebugger::get_whenline_data_for_script(const String &p_script_path) const {
+	Dictionary result;
+	const HashMap<String, HashMap<int, WhenlineEditorEntry>>::ConstIterator script_it = whenline_data.find(p_script_path);
+	if (script_it == whenline_data.end()) {
+		return result;
+	}
+	for (const KeyValue<int, WhenlineEditorEntry> &kv : script_it->value) {
+		Dictionary entry;
+		entry["first_time_usec"] = (int64_t)kv.value.first_time_usec;
+		entry["last_time_usec"] = (int64_t)kv.value.last_time_usec;
+		entry["count"] = (int64_t)kv.value.count;
+		result[kv.key] = entry;
+	}
+	return result;
+}
+
 void ScriptEditorDebugger::_parse_message(const String &p_msg, uint64_t p_thread_id, const Array &p_data) {
 	emit_signal(SNAME("debug_data"), p_msg, p_data);
 
@@ -1029,6 +1094,7 @@ void ScriptEditorDebugger::_init_parse_message_handlers() {
 	parse_message_handlers["window:title"] = &ScriptEditorDebugger::_msg_window_title;
 	parse_message_handlers["request_embed_suspend_toggle"] = &ScriptEditorDebugger::_msg_embed_suspend_toggle;
 	parse_message_handlers["request_embed_next_frame"] = &ScriptEditorDebugger::_msg_embed_next_frame;
+	parse_message_handlers["gdscript:whenline_data"] = &ScriptEditorDebugger::_msg_whenline_data;
 }
 
 void ScriptEditorDebugger::_set_reason_text(const String &p_reason, MessageType p_type) {
@@ -1257,6 +1323,8 @@ String ScriptEditorDebugger::_format_frame_text(const ScriptLanguage::StackInfo 
 
 void ScriptEditorDebugger::start(Ref<RemoteDebuggerPeer> p_peer) {
 	_clear_errors_list();
+	print_line("Resetting whenline data");
+	_whenline_clear_session_data();
 	stop();
 
 	profiler->set_enabled(true, true);
@@ -2070,6 +2138,7 @@ void ScriptEditorDebugger::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("clear_breakpoints"));
 	ADD_SIGNAL(MethodInfo("errors_cleared"));
 	ADD_SIGNAL(MethodInfo("embed_shortcut_requested", PropertyInfo(Variant::INT, "embed_shortcut_action")));
+	ADD_SIGNAL(MethodInfo("whenline_data_updated"));
 }
 
 void ScriptEditorDebugger::add_debugger_tab(Control *p_control) {
