@@ -37,8 +37,8 @@
 #include "core/object/callable_mp.h"
 #include "core/object/class_db.h"
 #include "core/os/keyboard.h"
-#include "core/string/print_string.h"
 #include "core/os/os.h"
+#include "core/string/print_string.h"
 #include "core/string/string_builder.h"
 #include "core/string/translation_server.h"
 #include "core/string/ustring.h"
@@ -2031,12 +2031,16 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 	// more calls = brighter
 
 	const Variant meta = get_line_gutter_metadata(p_line, p_gutter);
-	if (meta.get_type() != Variant::DICTIONARY) return;
+	if (meta.get_type() != Variant::DICTIONARY) {
+		return;
+	}
 
 	const Dictionary d = meta;
 
 	const int64_t count = d.get("count", 0);
-	if (count <= 0) return;
+	if (count <= 0) {
+		return;
+	}
 
 	RID ci = get_text_canvas_item();
 	Color base_color = Color(0.512, 0.836, 0.288, 1.0);
@@ -4042,7 +4046,6 @@ CodeEdit::CodeEdit() {
 	set_gutter_type(gutter_idx, GUTTER_TYPE_CUSTOM);
 	set_gutter_custom_draw(gutter_idx, callable_mp(this, &CodeEdit::_fold_gutter_draw_callback));
 	gutter_idx++;
-
 
 	/* Whenline Gutter */
 	add_gutter();

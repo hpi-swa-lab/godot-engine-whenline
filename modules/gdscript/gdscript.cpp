@@ -2630,8 +2630,8 @@ void GDScriptLanguage::_whenline_flush() {
 	Array payload;
 	for (const KeyValue<StringName, HashMap<int, WhenlineEntry>> &script_kv : to_send) {
 		for (const KeyValue<int, WhenlineEntry> &line_kv : script_kv.value) {
-			payload.push_back(String(script_kv.key));             // script path (String)
-			payload.push_back(line_kv.key);                       // 1-based line number (int)
+			payload.push_back(String(script_kv.key)); // script path (String)
+			payload.push_back(line_kv.key); // 1-based line number (int)
 			payload.push_back((int64_t)line_kv.value.first_time_usec);
 			payload.push_back((int64_t)line_kv.value.last_time_usec);
 			payload.push_back((int64_t)line_kv.value.count);

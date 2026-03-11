@@ -234,15 +234,25 @@ void ScriptEditor::_update_whenline_gutters(int p_debugger) {
 
 	for (int i = 0; i < tab_container->get_tab_count(); i++) {
 		TextEditorBase *teb = Object::cast_to<TextEditorBase>(tab_container->get_tab_control(i));
-		if (!teb) continue;
+		if (!teb) {
+			continue;
+		}
 		CodeTextEditor *cte = teb->get_code_editor();
-		if (!cte) continue;
+		if (!cte) {
+			continue;
+		}
 		CodeEdit *code_edit = cte->get_text_editor();
-		if (!code_edit) continue;
+		if (!code_edit) {
+			continue;
+		}
 		Ref<Resource> res = teb->get_edited_resource();
-		if (res.is_null()) continue;
+		if (res.is_null()) {
+			continue;
+		}
 		const String script_path = res->get_path();
-		if (script_path.is_empty()) continue;
+		if (script_path.is_empty()) {
+			continue;
+		}
 
 		const Dictionary line_data = dbg->get_whenline_data_for_script(script_path);
 
