@@ -3906,6 +3906,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				if (EngineDebugger::is_active()) {
 					// Whenline execution recording
+					// @TODO look up stack trace here
 					GDScriptLanguage::get_singleton()->_whenline_record_line(source, line, OS::get_singleton()->get_ticks_usec());
 
 					// line

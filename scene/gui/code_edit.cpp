@@ -2038,6 +2038,7 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 	const int64_t count = d.get("count", 0);
 	if (count <= 0) return;
 
+	RID ci = get_text_canvas_item();
 	Color base_color = Color(0.512, 0.836, 0.288, 1.0);
 
 	const float log_intensity = CLAMP(
@@ -2047,14 +2048,12 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 
 	base_color.a = alpha;
 
-	// fill square with margins
-	const float pad = MAX(1.0f, p_region.size.y * 0.08f);
-	Rect2 bar = p_region;
-	bar.position.y += pad;
-	bar.size.y -= pad * 2.0f;
-	bar.size.x = MAX(2.0f, p_region.size.x - 2.0f);
+	int padding = p_region.size.x / 6;
+	Rect2 icon_region = p_region;
+	icon_region.position += Point2(padding, padding);
+	icon_region.size -= Point2(padding, padding) * 2;
 
-	draw_rect(bar, base_color);
+	theme_cache.folded_icon->draw_rect(ci, icon_region, false, base_color);
 }
 
 /* Delimiters */
