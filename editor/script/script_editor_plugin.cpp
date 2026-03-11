@@ -257,6 +257,7 @@ void ScriptEditor::_update_whenline_gutters(int p_debugger) {
 				code_edit->set_line_gutter_metadata(ln, code_edit->get_whenline_gutter_index(), Variant());
 			}
 		}
+		code_edit->queue_redraw();
 	}
 }
 
