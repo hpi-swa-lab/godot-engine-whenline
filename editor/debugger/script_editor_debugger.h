@@ -294,11 +294,21 @@ private:
 	void _clear_execution();
 	void _stop_and_notify();
 
+	enum WhenlineReason {
+		WHENLINE_REASON_UNKNOWN = 0,
+		WHENLINE_REASON_INIT = 1, // _init, _ready, @implicit_new, @implicit_ready, _enter_tree, etc.
+		WHENLINE_REASON_PROCESS = 2, // _process, _physics_process, _draw
+		WHENLINE_REASON_INPUT = 3, // _input, _unhandled_input, _gui_input, _shortcut_input, etc.
+		WHENLINE_REASON_OTHER = 4, // anything else
+	};
+
 	// maps string -> lines -> execution data
 	struct WhenlineEditorEntry {
 		uint64_t first_time_usec = 0;
 		uint64_t last_time_usec = 0;
 		uint64_t count = 0;
+		uint8_t last_reason = WHENLINE_REASON_UNKNOWN;
+		uint8_t reason_mask = 0;
 	};
 	HashMap<String, HashMap<int, WhenlineEditorEntry>> whenline_data;
 	void _whenline_clear_session_data();

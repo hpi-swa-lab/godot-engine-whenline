@@ -2596,7 +2596,67 @@ void GDScriptLanguage::frame() {
 	}
 }
 
+GDScriptLanguage::WhenlineReason GDScriptLanguage::_whenline_classify_function_name(const StringName &p_name) {
+	// init
+	static const StringName sn_implicit_new("@implicit_new");
+	static const StringName sn_implicit_ready("@implicit_ready");
+	static const StringName sn_static_initializer("@static_initializer");
+	static const StringName sn_init("_init");
+	static const StringName sn_static_init("_static_init");
+	static const StringName sn_ready("_ready");
+	static const StringName sn_enter_tree("_enter_tree");
+	static const StringName sn_exit_tree("_exit_tree");
+	if (p_name == sn_implicit_new || p_name == sn_implicit_ready ||
+			p_name == sn_static_initializer || p_name == sn_init ||
+			p_name == sn_static_init || p_name == sn_ready ||
+			p_name == sn_enter_tree || p_name == sn_exit_tree) {
+		return WHENLINE_REASON_INIT;
+	}
+
+	// regular updates
+	static const StringName sn_process("_process");
+	static const StringName sn_physics_process("_physics_process");
+	static const StringName sn_draw("_draw");
+	if (p_name == sn_process || p_name == sn_physics_process || p_name == sn_draw) {
+		return WHENLINE_REASON_PROCESS;
+	}
+
+	// user input
+	static const StringName sn_input("_input");
+	static const StringName sn_unhandled_input("_unhandled_input");
+	static const StringName sn_unhandled_key_input("_unhandled_key_input");
+	static const StringName sn_gui_input("_gui_input");
+	static const StringName sn_shortcut_input("_shortcut_input");
+	if (p_name == sn_input || p_name == sn_unhandled_input ||
+			p_name == sn_unhandled_key_input || p_name == sn_gui_input ||
+			p_name == sn_shortcut_input) {
+		return WHENLINE_REASON_INPUT;
+	}
+
+	// everything else
+	return WHENLINE_REASON_OTHER;
+}
+
+GDScriptLanguage::WhenlineReason GDScriptLanguage::_whenline_get_current_reason() const {
+	// Walk up the callstack to the root
+	const CallLevel *cl = _call_stack;
+	if (!cl) {
+		return WHENLINE_REASON_UNKNOWN;
+	}
+	while (cl->prev) {
+		cl = cl->prev;
+	}
+	if (!cl->function) {
+
+		return WHENLINE_REASON_UNKNOWN;
+	}
+	return _whenline_classify_function_name(cl->function->get_name());
+}
+
 void GDScriptLanguage::_whenline_record_line(const StringName &p_source, int p_line, uint64_t p_usec) {
+	const WhenlineReason reason = _whenline_get_current_reason();
+	const uint8_t reason_bit = (uint8_t)(1 << reason);
+
 	// this can be called from any thread so its mutex time
 	MutexLock lock(mutex);
 	HashMap<int, WhenlineEntry> &script_map = _whenline_pending[p_source];
@@ -2607,10 +2667,14 @@ void GDScriptLanguage::_whenline_record_line(const StringName &p_source, int p_l
 		entry.first_time_usec = p_usec;
 		entry.last_time_usec = p_usec;
 		entry.count = 1;
+		entry.last_reason = (uint8_t)reason;
+		entry.reason_mask = reason_bit;
 		script_map.insert(p_line, entry);
 	} else {
 		it->value.last_time_usec = p_usec;
 		it->value.count++;
+		it->value.last_reason = (uint8_t)reason;
+		it->value.reason_mask |= reason_bit;
 	}
 }
 
@@ -2635,6 +2699,8 @@ void GDScriptLanguage::_whenline_flush() {
 			payload.push_back((int64_t)line_kv.value.first_time_usec);
 			payload.push_back((int64_t)line_kv.value.last_time_usec);
 			payload.push_back((int64_t)line_kv.value.count);
+			payload.push_back((int64_t)line_kv.value.reason_mask);
+			payload.push_back((int64_t)line_kv.value.last_reason);
 		}
 	}
 

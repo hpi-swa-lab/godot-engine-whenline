@@ -272,6 +272,11 @@ private:
 		Color executing_line_color = Color(1, 1, 1);
 		Ref<Texture2D> executing_line_icon;
 
+		Ref<Texture2D> whenline_icon_init;
+		Ref<Texture2D> whenline_icon_process;
+		Ref<Texture2D> whenline_icon_input;
+		Ref<Texture2D> whenline_icon_other;
+
 		Color line_number_color = Color(1, 1, 1);
 
 		/* Code Completion */

@@ -2028,8 +2028,6 @@ bool CodeEdit::is_drawing_whenline_gutter() const {
 }
 
 void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_region) {
-	// more calls = brighter
-
 	const Variant meta = get_line_gutter_metadata(p_line, p_gutter);
 	if (meta.get_type() != Variant::DICTIONARY) {
 		return;
@@ -2039,6 +2037,30 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 
 	const int64_t count = d.get("count", 0);
 	if (count <= 0) {
+		return;
+	}
+
+	const int64_t last_reason = d.get("last_reason", 0);
+	Ref<Texture2D> icon;
+	switch (last_reason) {
+		case 1: // WHENLINE_REASON_INIT
+			icon = theme_cache.whenline_icon_init;
+			break;
+		case 2: // WHENLINE_REASON_PROCESS
+			icon = theme_cache.whenline_icon_process;
+			break;
+		case 3: // WHENLINE_REASON_INPUT
+			icon = theme_cache.whenline_icon_input;
+			break;
+		case 4: // WHENLINE_REASON_OTHER
+			icon = theme_cache.whenline_icon_other;
+			break;
+		default:
+			// TODO question mark icon?
+			break;
+	}
+
+	if (icon.is_null()) {
 		return;
 	}
 
@@ -2057,7 +2079,17 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 	icon_region.position += Point2(padding, padding);
 	icon_region.size -= Point2(padding, padding) * 2;
 
-	theme_cache.folded_icon->draw_rect(ci, icon_region, false, base_color);
+	icon->draw_rect(ci, icon_region, false, base_color);
+
+	int reason_count = 0;
+	// TODO add small icon if there are multiple meaningful reasons
+	if (reason_count > 1) {
+		const float dot_size = MAX(2.0f, icon_region.size.x * 0.3f);
+		Rect2 dot_rect;
+		dot_rect.size = Size2(dot_size, dot_size);
+		dot_rect.position = icon_region.get_end() - dot_rect.size;
+		RenderingServer::get_singleton()->canvas_item_add_rect(ci, dot_rect, Color(1.0f, 1.0f, 1.0f, 0.8f));
+	}
 }
 
 /* Delimiters */
@@ -3133,6 +3165,11 @@ void CodeEdit::_bind_methods() {
 
 	BIND_THEME_ITEM(Theme::DATA_TYPE_COLOR, CodeEdit, executing_line_color);
 	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, executing_line_icon, "executing_line");
+
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_init, "whenline_init");
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_process, "whenline_process");
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_input, "whenline_input");
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_other, "whenline_other");
 
 	BIND_THEME_ITEM(Theme::DATA_TYPE_COLOR, CodeEdit, line_number_color);
 
