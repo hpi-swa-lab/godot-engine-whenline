@@ -295,6 +295,7 @@ class ScriptEditor : public PanelContainer {
 	void _change_execution(Ref<RefCounted> p_script, int p_line = -1, bool p_set = false);
 	void _set_execution(Ref<RefCounted> p_script, int p_line) { _change_execution(p_script, p_line, true); }
 	void _clear_execution(Ref<RefCounted> p_script) { _change_execution(p_script); }
+	void _update_whenline_gutters(int p_debugger);
 	String _get_debug_tooltip(const String &p_text, Node *p_se);
 	void _script_created(Ref<Script> p_script);
 	void _set_breakpoint(Ref<RefCounted> p_script, int p_line, bool p_enabled);

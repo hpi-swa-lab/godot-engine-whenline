@@ -136,6 +136,11 @@ private:
 	bool _fold_line(int p_line);
 	bool _unfold_line(int p_line);
 
+	/* Whenline Gutter */
+	int whenline_gutter = -1;
+	bool draw_whenline_gutter = true;
+	void _whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_region);
+
 	/* Delimiters */
 	enum DelimiterType {
 		TYPE_STRING,
@@ -267,6 +272,11 @@ private:
 		Color executing_line_color = Color(1, 1, 1);
 		Ref<Texture2D> executing_line_icon;
 
+		Ref<Texture2D> whenline_icon_init;
+		Ref<Texture2D> whenline_icon_process;
+		Ref<Texture2D> whenline_icon_input;
+		Ref<Texture2D> whenline_icon_other;
+
 		Color line_number_color = Color(1, 1, 1);
 
 		/* Code Completion */
@@ -344,6 +354,7 @@ public:
 	/* General overrides */
 	virtual void gui_input(const Ref<InputEvent> &p_gui_input) override;
 	virtual CursorShape get_cursor_shape(const Point2 &p_pos = Point2i()) const override;
+	virtual String get_tooltip(const Point2 &p_pos) const override;
 
 	/* Indent management */
 	void set_indent_size(const int p_size);
@@ -446,6 +457,11 @@ public:
 	void set_code_region_tags(const String &p_start = "region", const String &p_end = "endregion");
 	bool is_line_code_region_start(int p_line) const;
 	bool is_line_code_region_end(int p_line) const;
+
+	/* Whenline Gutter */
+	void set_draw_whenline_gutter(bool p_draw);
+	bool is_drawing_whenline_gutter() const;
+	int get_whenline_gutter_index() const { return whenline_gutter; }
 
 	/* Delimiters */
 	void add_string_delimiter(const String &p_start_key, const String &p_end_key, bool p_line_only = false);

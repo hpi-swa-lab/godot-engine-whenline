@@ -38,6 +38,7 @@
 #include "core/object/class_db.h"
 #include "core/os/keyboard.h"
 #include "core/os/os.h"
+#include "core/string/print_string.h"
 #include "core/string/string_builder.h"
 #include "core/string/translation_server.h"
 #include "core/string/ustring.h"
@@ -63,6 +64,7 @@ void CodeEdit::_notification(int p_what) {
 			set_gutter_width(main_gutter, get_line_height());
 			_update_line_number_gutter_width();
 			set_gutter_width(fold_gutter, get_line_height() / 1.2);
+			set_gutter_width(whenline_gutter, get_line_height() / 1.2);
 			_clear_line_number_text_cache();
 		} break;
 
@@ -2017,6 +2019,148 @@ bool CodeEdit::is_line_code_region_end(int p_line) const {
 	return split.size() > 0 && split[0] == code_region_end_string;
 }
 
+/* Whenline gutter */
+void CodeEdit::set_draw_whenline_gutter(bool p_draw) {
+	set_gutter_draw(whenline_gutter, p_draw);
+}
+
+bool CodeEdit::is_drawing_whenline_gutter() const {
+	return is_gutter_drawn(whenline_gutter);
+}
+
+void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_region) {
+	const Variant meta = get_line_gutter_metadata(p_line, p_gutter);
+	if (meta.get_type() != Variant::DICTIONARY) {
+		return;
+	}
+
+	const Dictionary d = meta;
+
+	const int64_t count = d.get("count", 0);
+	if (count <= 0) {
+		return;
+	}
+
+	static const String reason_count_keys[] = { "", "count_init", "count_process", "count_input", "count_other" };
+	int biggest_reason = 0;
+	int64_t biggest_count = 0;
+	int reason_count = 0;
+	for (int i = 1; i <= 4; i++) {
+		const int64_t current_count = (int64_t)d.get(reason_count_keys[i], (int64_t) 0);
+		if (current_count > 0) {
+			reason_count++;
+			if (current_count > biggest_count) {
+				biggest_count = current_count;
+				biggest_reason = i;
+			}
+		}
+	}
+
+	Ref<Texture2D> icon;
+	switch (biggest_reason) {
+		case 1: // WHENLINE_REASON_INIT
+			icon = theme_cache.whenline_icon_init;
+			break;
+		case 2: // WHENLINE_REASON_PROCESS
+			icon = theme_cache.whenline_icon_process;
+			break;
+		case 3: // WHENLINE_REASON_INPUT
+			icon = theme_cache.whenline_icon_input;
+			break;
+		case 4: // WHENLINE_REASON_OTHER
+			icon = theme_cache.whenline_icon_other;
+			break;
+		default:
+			// TODO question mark icon?
+			break;
+	}
+
+	if (icon.is_null()) {
+		return;
+	}
+
+	RID ci = get_text_canvas_item();
+	Color base_color = Color(0.512, 0.836, 0.288, 1.0);
+
+	const float log_intensity = CLAMP(
+			(float)Math::log((double)(count + 1)) / (float)Math::log(64.0),
+			0.0f, 1.0f);
+	const float alpha = Math::lerp(0.35f, 0.90f, log_intensity);
+
+	base_color.a = alpha;
+
+	int horizontal_padding = p_region.size.x / 10;
+	int vertical_padding = p_region.size.y / 6;
+
+	Rect2 icon_region = p_region;
+	icon_region.position += Point2(horizontal_padding, vertical_padding);
+	icon_region.size -= Point2(horizontal_padding, vertical_padding) * 2;
+
+	icon->draw_rect(ci, icon_region, false, base_color);
+
+	if (reason_count > 1) {
+		const float dot_size = MAX(2.0f, icon_region.size.x * 0.3f);
+		Rect2 dot_rect;
+		dot_rect.size = Size2(dot_size, dot_size);
+		dot_rect.position = icon_region.get_end() - dot_rect.size;
+		RenderingServer::get_singleton()->canvas_item_add_rect(ci, dot_rect, Color(1.0f, 1.0f, 1.0f, 0.8f));
+	}
+}
+
+String CodeEdit::get_tooltip(const Point2 &p_pos) const {
+	if (whenline_gutter == -1) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+	const Vector2i hovered = get_hovered_gutter();
+	if (hovered.x != whenline_gutter || hovered.y < 0) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+	const Variant meta = get_line_gutter_metadata(hovered.y, whenline_gutter);
+	if (meta.get_type() != Variant::DICTIONARY) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+	const Dictionary d = meta;
+	const int64_t count = d.get("count", (int64_t) 0);
+	if (count <= 0) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+
+	struct ReasonEntry {
+		String count_key;
+		String label;
+	};
+	static const ReasonEntry reason_entries[] = {
+		{ "count_init", "Startup" },
+		{ "count_process", "Per-frame (process)" },
+		{ "count_input", "User Input" },
+		{ "count_other", "Signal or Notification" },
+	};
+
+	String reasons;
+	int reason_count = 0;
+	for (const ReasonEntry &entry : reason_entries) {
+		const int64_t rc = (int64_t)d.get(entry.count_key, (int64_t)0);
+		if (rc > 0) {
+			if (!reasons.is_empty()) {
+				reasons += "\n";
+			}
+			reasons += " - " + entry.label + ": " + String::num_int64(rc);
+			reason_count++;
+		}
+	}
+
+	const String count_line = "Executed " + String::num_int64(count) + " times";
+
+	if (reason_count <= 1) {
+		return count_line;
+	}
+	return count_line + "\n" + TTR("Triggered from:") + "\n" + reasons;
+}
+
 /* Delimiters */
 // Strings
 void CodeEdit::add_string_delimiter(const String &p_start_key, const String &p_end_key, bool p_line_only) {
@@ -3091,6 +3235,11 @@ void CodeEdit::_bind_methods() {
 	BIND_THEME_ITEM(Theme::DATA_TYPE_COLOR, CodeEdit, executing_line_color);
 	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, executing_line_icon, "executing_line");
 
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_init, "whenline_init");
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_process, "whenline_process");
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_input, "whenline_input");
+	BIND_THEME_ITEM_CUSTOM(Theme::DATA_TYPE_ICON, CodeEdit, whenline_icon_other, "whenline_other");
+
 	BIND_THEME_ITEM(Theme::DATA_TYPE_COLOR, CodeEdit, line_number_color);
 
 	/* Code Completion */
@@ -3224,6 +3373,11 @@ void CodeEdit::_update_gutter_indexes() {
 
 		if (get_gutter_name(i) == "fold_gutter") {
 			fold_gutter = i;
+			continue;
+		}
+
+		if (get_gutter_name(i) == "whenline_gutter") {
+			whenline_gutter = i;
 			continue;
 		}
 	}
@@ -3997,6 +4151,14 @@ CodeEdit::CodeEdit() {
 	set_gutter_draw(gutter_idx, false);
 	set_gutter_type(gutter_idx, GUTTER_TYPE_CUSTOM);
 	set_gutter_custom_draw(gutter_idx, callable_mp(this, &CodeEdit::_fold_gutter_draw_callback));
+	gutter_idx++;
+
+	/* Whenline Gutter */
+	add_gutter();
+	set_gutter_name(gutter_idx, "whenline_gutter");
+	set_gutter_draw(gutter_idx, true);
+	set_gutter_type(gutter_idx, GUTTER_TYPE_CUSTOM);
+	set_gutter_custom_draw(gutter_idx, callable_mp(this, &CodeEdit::_whenline_gutter_draw_callback));
 	gutter_idx++;
 
 	/* Symbol tooltip */

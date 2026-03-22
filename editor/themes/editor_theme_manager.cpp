@@ -592,6 +592,10 @@ void EditorThemeManager::_populate_text_editor_styles(const Ref<EditorTheme> &p_
 	p_theme->set_icon("can_fold_code_region", "CodeEdit", p_theme->get_icon(SNAME("CodeRegionFoldDownArrow"), EditorStringName(EditorIcons)));
 	p_theme->set_icon("executing_line",       "CodeEdit", p_theme->get_icon(SNAME("TextEditorPlay"), EditorStringName(EditorIcons)));
 	p_theme->set_icon("breakpoint",           "CodeEdit", p_theme->get_icon(SNAME("Breakpoint"), EditorStringName(EditorIcons)));
+	p_theme->set_icon("whenline_init",        "CodeEdit", p_theme->get_icon(SNAME("PlayStart"), EditorStringName(EditorIcons)));
+	p_theme->set_icon("whenline_process",     "CodeEdit", p_theme->get_icon(SNAME("Loop"), EditorStringName(EditorIcons)));
+	p_theme->set_icon("whenline_input",       "CodeEdit", p_theme->get_icon(SNAME("InputEventAction"), EditorStringName(EditorIcons)));
+	p_theme->set_icon("whenline_other",       "CodeEdit", p_theme->get_icon(SNAME("Signal"), EditorStringName(EditorIcons)));
 	/* clang-format on */
 
 	p_theme->set_constant("line_spacing", "CodeEdit", EDITOR_GET("text_editor/appearance/whitespace/line_spacing"));

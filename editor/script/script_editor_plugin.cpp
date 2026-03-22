@@ -225,6 +225,52 @@ void ScriptEditor::_change_execution(Ref<RefCounted> p_script, int p_line, bool 
 	}
 }
 
+void ScriptEditor::_update_whenline_gutters(int p_debugger) {
+	// fetch data from debugger to put it in the gutter slots
+	ScriptEditorDebugger *dbg = EditorDebuggerNode::get_singleton()->get_debugger(p_debugger);
+	if (!dbg) {
+		return;
+	}
+
+	for (int i = 0; i < tab_container->get_tab_count(); i++) {
+		TextEditorBase *teb = Object::cast_to<TextEditorBase>(tab_container->get_tab_control(i));
+		if (!teb) {
+			continue;
+		}
+		CodeTextEditor *cte = teb->get_code_editor();
+		if (!cte) {
+			continue;
+		}
+		CodeEdit *code_edit = cte->get_text_editor();
+		if (!code_edit) {
+			continue;
+		}
+		Ref<Resource> res = teb->get_edited_resource();
+		if (res.is_null()) {
+			continue;
+		}
+		const String script_path = res->get_path();
+		if (script_path.is_empty()) {
+			continue;
+		}
+
+		const Dictionary line_data = dbg->get_whenline_data_for_script(script_path);
+
+		const int line_count = code_edit->get_line_count();
+		for (int ln = 0; ln < line_count; ln++) {
+			// we start at line 1 (code_edit starts at line 0)
+			const int key = ln + 1;
+			if (line_data.has(key)) {
+				code_edit->set_line_gutter_metadata(ln, code_edit->get_whenline_gutter_index(), line_data[key]);
+			} else {
+				// clear stuff from last run
+				code_edit->set_line_gutter_metadata(ln, code_edit->get_whenline_gutter_index(), Variant());
+			}
+		}
+		code_edit->queue_redraw();
+	}
+}
+
 void ScriptEditor::_set_breakpoint(Ref<RefCounted> p_script, int p_line, bool p_enabled) {
 	Ref<Script> scr = Object::cast_to<Script>(*p_script);
 	if (scr.is_valid() && (scr->has_source_code() || scr->get_path().is_resource_file())) {
@@ -4002,6 +4048,7 @@ ScriptEditor::ScriptEditor(WindowWrapper *p_wrapper) {
 	debugger->connect("clear_execution", callable_mp(this, &ScriptEditor::_clear_execution));
 	debugger->connect("breakpoint_set_in_tree", callable_mp(this, &ScriptEditor::_set_breakpoint));
 	debugger->connect("breakpoints_cleared_in_tree", callable_mp(this, &ScriptEditor::_clear_breakpoints));
+	debugger->connect("whenline_data_updated", callable_mp(this, &ScriptEditor::_update_whenline_gutters));
 
 	script_name_button_hbox = memnew(HBoxContainer);
 	script_name_button_hbox->set_h_size_flags(SIZE_EXPAND_FILL);

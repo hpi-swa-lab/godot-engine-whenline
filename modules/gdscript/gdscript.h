@@ -462,6 +462,30 @@ class GDScriptLanguage : public ScriptLanguage {
 	uint64_t script_frame_time;
 #endif
 
+	enum WhenlineReason {
+		WHENLINE_REASON_UNKNOWN = 0,
+		WHENLINE_REASON_INIT = 1, // _init, _ready, @implicit_new, @implicit_ready, _enter_tree, etc.
+		WHENLINE_REASON_PROCESS = 2, // _process, _physics_process, _draw
+		WHENLINE_REASON_INPUT = 3, // _input, _unhandled_input, _gui_input, _shortcut_input, etc.
+		WHENLINE_REASON_OTHER = 4, // anything else
+	};
+
+	// same as in debugger
+	struct WhenlineEntry {
+		uint64_t first_time_usec = 0;
+		uint64_t last_time_usec = 0;
+		uint64_t count = 0;
+		uint64_t reason_counts[5] = {};
+	};
+	HashMap<StringName, HashMap<int, WhenlineEntry>> _whenline_pending;
+
+	WhenlineReason _whenline_get_current_reason() const;
+	static WhenlineReason _whenline_classify_function_name(const StringName &p_name);
+
+	void _whenline_record_line(const StringName &p_source, int p_line, uint64_t p_usec);
+	void _whenline_flush(); // call each frame
+	void _whenline_clear(); // call each session
+
 	HashMap<String, ObjectID> orphan_subclasses;
 
 #ifdef TOOLS_ENABLED

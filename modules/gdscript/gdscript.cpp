@@ -2589,6 +2589,126 @@ void GDScriptLanguage::frame() {
 	}
 
 #endif
+
+	// This should also work in release with always_track_call_stacks so it is here
+	if (!_whenline_pending.is_empty() && EngineDebugger::is_active()) {
+		_whenline_flush();
+	}
+}
+
+GDScriptLanguage::WhenlineReason GDScriptLanguage::_whenline_classify_function_name(const StringName &p_name) {
+	// init
+	static const StringName sn_implicit_new("@implicit_new");
+	static const StringName sn_implicit_ready("@implicit_ready");
+	static const StringName sn_static_initializer("@static_initializer");
+	static const StringName sn_init("_init");
+	static const StringName sn_static_init("_static_init");
+	static const StringName sn_ready("_ready");
+	static const StringName sn_enter_tree("_enter_tree");
+	static const StringName sn_exit_tree("_exit_tree");
+	if (p_name == sn_implicit_new || p_name == sn_implicit_ready ||
+			p_name == sn_static_initializer || p_name == sn_init ||
+			p_name == sn_static_init || p_name == sn_ready ||
+			p_name == sn_enter_tree || p_name == sn_exit_tree) {
+		return WHENLINE_REASON_INIT;
+	}
+
+	// regular updates
+	static const StringName sn_process("_process");
+	static const StringName sn_physics_process("_physics_process");
+	static const StringName sn_draw("_draw");
+	if (p_name == sn_process || p_name == sn_physics_process || p_name == sn_draw) {
+		return WHENLINE_REASON_PROCESS;
+	}
+
+	// user input
+	static const StringName sn_input("_input");
+	static const StringName sn_unhandled_input("_unhandled_input");
+	static const StringName sn_unhandled_key_input("_unhandled_key_input");
+	static const StringName sn_gui_input("_gui_input");
+	static const StringName sn_shortcut_input("_shortcut_input");
+	if (p_name == sn_input || p_name == sn_unhandled_input ||
+			p_name == sn_unhandled_key_input || p_name == sn_gui_input ||
+			p_name == sn_shortcut_input) {
+		return WHENLINE_REASON_INPUT;
+	}
+
+	// everything else
+	return WHENLINE_REASON_OTHER;
+}
+
+GDScriptLanguage::WhenlineReason GDScriptLanguage::_whenline_get_current_reason() const {
+	// Walk up the callstack to the root
+	const CallLevel *cl = _call_stack;
+	if (!cl) {
+		return WHENLINE_REASON_UNKNOWN;
+	}
+	while (cl->prev) {
+		cl = cl->prev;
+	}
+	if (!cl->function) {
+
+		return WHENLINE_REASON_UNKNOWN;
+	}
+	return _whenline_classify_function_name(cl->function->get_name());
+}
+
+void GDScriptLanguage::_whenline_record_line(const StringName &p_source, int p_line, uint64_t p_usec) {
+	const WhenlineReason reason = _whenline_get_current_reason();
+
+	// this can be called from any thread so its mutex time
+	MutexLock lock(mutex);
+	HashMap<int, WhenlineEntry> &script_map = _whenline_pending[p_source];
+	HashMap<int, WhenlineEntry>::Iterator it = script_map.find(p_line);
+	// create or update
+	if (it == script_map.end()) {
+		WhenlineEntry entry;
+		entry.first_time_usec = p_usec;
+		entry.last_time_usec = p_usec;
+		entry.count = 1;
+		entry.reason_counts[reason]++;
+		script_map.insert(p_line, entry);
+	} else {
+		it->value.last_time_usec = p_usec;
+		it->value.count++;
+		it->value.reason_counts[reason]++;
+	}
+}
+
+void GDScriptLanguage::_whenline_flush() {
+	// send accumulated stats and start new recording
+	HashMap<StringName, HashMap<int, WhenlineEntry>> to_send;
+	{
+		MutexLock lock(mutex);
+		to_send = std::move(_whenline_pending);
+		_whenline_pending.clear();
+	}
+
+	if (to_send.is_empty()) {
+		return;
+	}
+
+	Array payload;
+	for (const KeyValue<StringName, HashMap<int, WhenlineEntry>> &script_kv : to_send) {
+		for (const KeyValue<int, WhenlineEntry> &line_kv : script_kv.value) {
+			payload.push_back(String(script_kv.key)); // script path (String)
+			payload.push_back(line_kv.key); // 1-based line number (int)
+			payload.push_back((int64_t)line_kv.value.first_time_usec);
+			payload.push_back((int64_t)line_kv.value.last_time_usec);
+			payload.push_back((int64_t)line_kv.value.count);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_INIT]);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_PROCESS]);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_INPUT]);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_OTHER]);
+		}
+	}
+
+	EngineDebugger::get_singleton()->send_message("gdscript:whenline_data", payload);
+}
+
+void GDScriptLanguage::_whenline_clear() {
+	MutexLock lock(mutex);
+	_whenline_pending.clear();
 }
 
 /* EDITOR FUNCTIONS */

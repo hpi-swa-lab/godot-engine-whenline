@@ -243,6 +243,7 @@ private:
 	void _msg_window_title(uint64_t p_thread_id, const Array &p_data);
 	void _msg_embed_suspend_toggle(uint64_t p_thread_id, const Array &p_data);
 	void _msg_embed_next_frame(uint64_t p_thread_id, const Array &p_data);
+	void _msg_whenline_data(uint64_t p_thread_id, const Array &p_data);
 
 	void _parse_message(const String &p_msg, uint64_t p_thread_id, const Array &p_data);
 	void _set_reason_text(const String &p_reason, MessageType p_type);
@@ -292,6 +293,24 @@ private:
 
 	void _clear_execution();
 	void _stop_and_notify();
+
+	enum WhenlineReason {
+		WHENLINE_REASON_UNKNOWN = 0,
+		WHENLINE_REASON_INIT = 1, // _init, _ready, @implicit_new, @implicit_ready, _enter_tree, etc.
+		WHENLINE_REASON_PROCESS = 2, // _process, _physics_process, _draw
+		WHENLINE_REASON_INPUT = 3, // _input, _unhandled_input, _gui_input, _shortcut_input, etc.
+		WHENLINE_REASON_OTHER = 4, // anything else
+	};
+
+	// maps string -> lines -> execution data
+	struct WhenlineEditorEntry {
+		uint64_t first_time_usec = 0;
+		uint64_t last_time_usec = 0;
+		uint64_t count = 0;
+		uint64_t reason_counts[5] = {};
+	};
+	HashMap<String, HashMap<int, WhenlineEditorEntry>> whenline_data;
+	void _whenline_clear_session_data();
 
 	void _set_breakpoint(const String &p_path, const int &p_line, const bool &p_enabled);
 	void _clear_breakpoints();
@@ -392,6 +411,8 @@ public:
 	void switch_to_debugger(int p_debugger_tab_idx);
 
 	void send_message(const String &p_message, const Array &p_args);
+
+	Dictionary get_whenline_data_for_script(const String &p_script_path) const;
 	void toggle_profiler(const String &p_profiler, bool p_enable, const Array &p_data);
 
 	ScriptEditorDebugger();
