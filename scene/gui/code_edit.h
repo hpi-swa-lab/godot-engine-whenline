@@ -354,6 +354,7 @@ public:
 	/* General overrides */
 	virtual void gui_input(const Ref<InputEvent> &p_gui_input) override;
 	virtual CursorShape get_cursor_shape(const Point2 &p_pos = Point2i()) const override;
+	virtual String get_tooltip(const Point2 &p_pos) const override;
 
 	/* Indent management */
 	void set_indent_size(const int p_size);

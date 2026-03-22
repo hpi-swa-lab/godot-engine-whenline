@@ -2075,7 +2075,6 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 
 	base_color.a = alpha;
 
-
 	int horizontal_padding = p_region.size.x / 10;
 	int vertical_padding = p_region.size.y / 6;
 
@@ -2098,6 +2097,67 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 		dot_rect.position = icon_region.get_end() - dot_rect.size;
 		RenderingServer::get_singleton()->canvas_item_add_rect(ci, dot_rect, Color(1.0f, 1.0f, 1.0f, 0.8f));
 	}
+}
+
+String CodeEdit::get_tooltip(const Point2 &p_pos) const {
+	if (whenline_gutter == -1) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+	const Vector2i hovered = get_hovered_gutter();
+	if (hovered.x != whenline_gutter || hovered.y < 0) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+	const Variant meta = get_line_gutter_metadata(hovered.y, whenline_gutter);
+	if (meta.get_type() != Variant::DICTIONARY) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+	const Dictionary d = meta;
+	const int64_t count = d.get("count", (int64_t) 0);
+	if (count <= 0) {
+		return TextEdit::get_tooltip(p_pos);
+	}
+
+	const int64_t reason_mask = d.get("reason_mask", (int64_t) 0);
+
+	enum WhenlineReason {
+		WHENLINE_REASON_UNKNOWN = 0,
+		WHENLINE_REASON_INIT = 1,
+		WHENLINE_REASON_PROCESS = 2,
+		WHENLINE_REASON_INPUT = 3,
+		WHENLINE_REASON_OTHER = 4,
+	};
+	struct ReasonEntry {
+		int64_t bit;
+		const String label;
+	};
+	static const ReasonEntry reason_entries[] = {
+		{ 1 << WHENLINE_REASON_INIT, "Startup" },
+		{ 1 << WHENLINE_REASON_PROCESS, "Per-frame (process)" },
+		{ 1 << WHENLINE_REASON_INPUT, "User Input" },
+		{ 1 << WHENLINE_REASON_OTHER, "Signal or Notification" },
+	};
+
+	String reasons;
+	int reason_count = 0;
+	for (const ReasonEntry &entry : reason_entries) {
+		if (reason_mask & entry.bit) {
+			if (!reasons.is_empty()) {
+				reasons += "\n";
+			}
+			reasons += " - " + String(entry.label);
+			reason_count++;
+		}
+	}
+
+	const String count_line = "Executed " + String::num_int64(count) + " times";
+
+	if (reason_count <= 1) {
+		return count_line;
+	}
+	return count_line + "\n" + TTR("Triggered from:") + "\n" + reasons;
 }
 
 /* Delimiters */
