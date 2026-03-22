@@ -2655,7 +2655,6 @@ GDScriptLanguage::WhenlineReason GDScriptLanguage::_whenline_get_current_reason(
 
 void GDScriptLanguage::_whenline_record_line(const StringName &p_source, int p_line, uint64_t p_usec) {
 	const WhenlineReason reason = _whenline_get_current_reason();
-	const uint8_t reason_bit = (uint8_t)(1 << reason);
 
 	// this can be called from any thread so its mutex time
 	MutexLock lock(mutex);
@@ -2667,14 +2666,12 @@ void GDScriptLanguage::_whenline_record_line(const StringName &p_source, int p_l
 		entry.first_time_usec = p_usec;
 		entry.last_time_usec = p_usec;
 		entry.count = 1;
-		entry.last_reason = (uint8_t)reason;
-		entry.reason_mask = reason_bit;
+		entry.reason_counts[reason]++;
 		script_map.insert(p_line, entry);
 	} else {
 		it->value.last_time_usec = p_usec;
 		it->value.count++;
-		it->value.last_reason = (uint8_t)reason;
-		it->value.reason_mask |= reason_bit;
+		it->value.reason_counts[reason]++;
 	}
 }
 
@@ -2699,8 +2696,10 @@ void GDScriptLanguage::_whenline_flush() {
 			payload.push_back((int64_t)line_kv.value.first_time_usec);
 			payload.push_back((int64_t)line_kv.value.last_time_usec);
 			payload.push_back((int64_t)line_kv.value.count);
-			payload.push_back((int64_t)line_kv.value.reason_mask);
-			payload.push_back((int64_t)line_kv.value.last_reason);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_INIT]);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_PROCESS]);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_INPUT]);
+			payload.push_back((int64_t)line_kv.value.reason_counts[WHENLINE_REASON_OTHER]);
 		}
 	}
 

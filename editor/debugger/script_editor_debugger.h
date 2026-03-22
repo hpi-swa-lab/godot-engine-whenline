@@ -307,8 +307,7 @@ private:
 		uint64_t first_time_usec = 0;
 		uint64_t last_time_usec = 0;
 		uint64_t count = 0;
-		uint8_t last_reason = WHENLINE_REASON_UNKNOWN;
-		uint8_t reason_mask = 0;
+		uint64_t reason_counts[5] = {};
 	};
 	HashMap<String, HashMap<int, WhenlineEditorEntry>> whenline_data;
 	void _whenline_clear_session_data();

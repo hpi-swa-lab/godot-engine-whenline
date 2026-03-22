@@ -981,7 +981,7 @@ void ScriptEditorDebugger::_msg_embed_next_frame(uint64_t p_thread_id, const Arr
 }
 
 void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array &p_data) {
-	const int record_size = 7;
+	const int record_size = 9;
 	ERR_FAIL_COND_MSG(p_data.size() % record_size != 0,
 			vformat("gdscript:whenline_data payload size %d is not a multiple of %d", p_data.size(), record_size));
 
@@ -995,8 +995,10 @@ void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array 
 		const uint64_t incoming_first = (uint64_t)(int64_t)p_data[i + 2];
 		const uint64_t incoming_last = (uint64_t)(int64_t)p_data[i + 3];
 		const uint64_t incoming_count = (uint64_t)(int64_t)p_data[i + 4];
-		const uint8_t incoming_reason_mask = (uint8_t)(int64_t)p_data[i + 5];
-		const uint8_t incoming_last_reason = (uint8_t)(int64_t)p_data[i + 6];
+		const uint64_t incoming_count_init    = (uint64_t)(int64_t)p_data[i + 5];
+		const uint64_t incoming_count_process = (uint64_t)(int64_t)p_data[i + 6];
+		const uint64_t incoming_count_input   = (uint64_t)(int64_t)p_data[i + 7];
+		const uint64_t incoming_count_other   = (uint64_t)(int64_t)p_data[i + 8];
 
 		HashMap<int, WhenlineEditorEntry> &script_map = whenline_data[script_path];
 		HashMap<int, WhenlineEditorEntry>::Iterator it = script_map.find(line);
@@ -1005,8 +1007,10 @@ void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array 
 			entry.first_time_usec = incoming_first;
 			entry.last_time_usec = incoming_last;
 			entry.count = incoming_count;
-			entry.reason_mask = incoming_reason_mask;
-			entry.last_reason = incoming_last_reason;
+			entry.reason_counts[WHENLINE_REASON_INIT] = incoming_count_init;
+			entry.reason_counts[WHENLINE_REASON_PROCESS] = incoming_count_process;
+			entry.reason_counts[WHENLINE_REASON_INPUT] = incoming_count_input;
+			entry.reason_counts[WHENLINE_REASON_OTHER] = incoming_count_other;
 			script_map.insert(line, entry);
 		} else {
 			// Keep the earliest first_time across all deltas.
@@ -1017,8 +1021,10 @@ void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array 
 				it->value.last_time_usec = incoming_last;
 			}
 			it->value.count += incoming_count;
-			it->value.reason_mask |= incoming_reason_mask;
-			it->value.last_reason = incoming_last_reason;
+			it->value.reason_counts[WHENLINE_REASON_INIT] += incoming_count_init;
+			it->value.reason_counts[WHENLINE_REASON_PROCESS] += incoming_count_process;
+			it->value.reason_counts[WHENLINE_REASON_INPUT] += incoming_count_input;
+			it->value.reason_counts[WHENLINE_REASON_OTHER] += incoming_count_other;
 		}
 		changed = true;
 	}
@@ -1044,8 +1050,10 @@ Dictionary ScriptEditorDebugger::get_whenline_data_for_script(const String &p_sc
 		entry["first_time_usec"] = (int64_t)kv.value.first_time_usec;
 		entry["last_time_usec"] = (int64_t)kv.value.last_time_usec;
 		entry["count"] = (int64_t)kv.value.count;
-		entry["reason_mask"] = (int64_t)kv.value.reason_mask;
-		entry["last_reason"] = (int64_t)kv.value.last_reason;
+		entry["count_init"] = (int64_t)kv.value.reason_counts[WHENLINE_REASON_INIT];
+		entry["count_process"] = (int64_t)kv.value.reason_counts[WHENLINE_REASON_PROCESS];
+		entry["count_input"] = (int64_t)kv.value.reason_counts[WHENLINE_REASON_INPUT];
+		entry["count_other"] = (int64_t)kv.value.reason_counts[WHENLINE_REASON_OTHER];
 		result[kv.key] = entry;
 	}
 	return result;

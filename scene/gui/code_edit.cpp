@@ -2041,9 +2041,23 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 		return;
 	}
 
-	const int64_t last_reason = d.get("last_reason", 0);
+	static const String reason_count_keys[] = { "", "count_init", "count_process", "count_input", "count_other" };
+	int biggest_reason = 0;
+	int64_t biggest_count = 0;
+	int reason_count = 0;
+	for (int i = 1; i <= 4; i++) {
+		const int64_t current_count = (int64_t)d.get(reason_count_keys[i], (int64_t) 0);
+		if (current_count > 0) {
+			reason_count++;
+			if (current_count > biggest_count) {
+				biggest_count = current_count;
+				biggest_reason = i;
+			}
+		}
+	}
+
 	Ref<Texture2D> icon;
-	switch (last_reason) {
+	switch (biggest_reason) {
 		case 1: // WHENLINE_REASON_INIT
 			icon = theme_cache.whenline_icon_init;
 			break;
@@ -2084,12 +2098,6 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 
 	icon->draw_rect(ci, icon_region, false, base_color);
 
-	int64_t reason_mask = (int64_t)d.get("reason_mask", 0) & ~(int64_t)1;
-	int reason_count = 0;
-	while (reason_mask) {
-        reason_count += reason_mask & 1;
-        reason_mask >>= 1;
-    }
 	if (reason_count > 1) {
 		const float dot_size = MAX(2.0f, icon_region.size.x * 0.3f);
 		Rect2 dot_rect;
@@ -2120,34 +2128,27 @@ String CodeEdit::get_tooltip(const Point2 &p_pos) const {
 		return TextEdit::get_tooltip(p_pos);
 	}
 
-	const int64_t reason_mask = d.get("reason_mask", (int64_t) 0);
 
-	enum WhenlineReason {
-		WHENLINE_REASON_UNKNOWN = 0,
-		WHENLINE_REASON_INIT = 1,
-		WHENLINE_REASON_PROCESS = 2,
-		WHENLINE_REASON_INPUT = 3,
-		WHENLINE_REASON_OTHER = 4,
-	};
 	struct ReasonEntry {
-		int64_t bit;
-		const String label;
+		String count_key;
+		String label;
 	};
 	static const ReasonEntry reason_entries[] = {
-		{ 1 << WHENLINE_REASON_INIT, "Startup" },
-		{ 1 << WHENLINE_REASON_PROCESS, "Per-frame (process)" },
-		{ 1 << WHENLINE_REASON_INPUT, "User Input" },
-		{ 1 << WHENLINE_REASON_OTHER, "Signal or Notification" },
+		{ "count_init", "Startup" },
+		{ "count_process", "Per-frame (process)" },
+		{ "count_input", "User Input" },
+		{ "count_other", "Signal or Notification" },
 	};
 
 	String reasons;
 	int reason_count = 0;
 	for (const ReasonEntry &entry : reason_entries) {
-		if (reason_mask & entry.bit) {
+		const int64_t rc = (int64_t)d.get(entry.count_key, (int64_t)0);
+		if (rc > 0) {
 			if (!reasons.is_empty()) {
 				reasons += "\n";
 			}
-			reasons += " - " + String(entry.label);
+			reasons += " - " + entry.label + ": " + String::num_int64(rc);
 			reason_count++;
 		}
 	}
