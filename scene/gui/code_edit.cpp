@@ -64,6 +64,7 @@ void CodeEdit::_notification(int p_what) {
 			set_gutter_width(main_gutter, get_line_height());
 			_update_line_number_gutter_width();
 			set_gutter_width(fold_gutter, get_line_height() / 1.2);
+			set_gutter_width(whenline_gutter, get_line_height() / 1.2);
 			_clear_line_number_text_cache();
 		} break;
 
@@ -2074,15 +2075,22 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 
 	base_color.a = alpha;
 
-	int padding = p_region.size.x / 6;
+
+	int horizontal_padding = p_region.size.x / 10;
+	int vertical_padding = p_region.size.y / 6;
+
 	Rect2 icon_region = p_region;
-	icon_region.position += Point2(padding, padding);
-	icon_region.size -= Point2(padding, padding) * 2;
+	icon_region.position += Point2(horizontal_padding, vertical_padding);
+	icon_region.size -= Point2(horizontal_padding, vertical_padding) * 2;
 
 	icon->draw_rect(ci, icon_region, false, base_color);
 
+	int64_t reason_mask = (int64_t)d.get("reason_mask", 0) & ~(int64_t)1;
 	int reason_count = 0;
-	// TODO add small icon if there are multiple meaningful reasons
+	while (reason_mask) {
+        reason_count += reason_mask & 1;
+        reason_mask >>= 1;
+    }
 	if (reason_count > 1) {
 		const float dot_size = MAX(2.0f, icon_region.size.x * 0.3f);
 		Rect2 dot_rect;
