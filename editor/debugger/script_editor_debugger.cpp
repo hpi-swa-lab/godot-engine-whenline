@@ -1036,6 +1036,7 @@ void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array 
 
 void ScriptEditorDebugger::_whenline_clear_session_data() {
 	whenline_data.clear();
+	whenline_influence.clear();
 	emit_signal(SNAME("whenline_data_updated"));
 }
 
@@ -1055,6 +1056,67 @@ Dictionary ScriptEditorDebugger::get_whenline_data_for_script(const String &p_sc
 		entry["count_input"] = (int64_t)kv.value.reason_counts[WHENLINE_REASON_INPUT];
 		entry["count_other"] = (int64_t)kv.value.reason_counts[WHENLINE_REASON_OTHER];
 		result[kv.key] = entry;
+	}
+	return result;
+}
+
+void ScriptEditorDebugger::_msg_whenline_influence(uint64_t p_thread_id, const Array &p_data) {
+	int i = 0;
+	bool changed = false;
+	while (i < p_data.size()) {
+		ERR_FAIL_COND(i + 2 >= p_data.size());
+		const String script_path = p_data[i];
+		const int line = p_data[i + 1];
+		const int num_vars = (int)(int64_t)p_data[i + 2];
+		i += 3;
+
+		ERR_FAIL_COND(i + num_vars * 6 > p_data.size());
+
+		WhenlineInfluenceLineData &line_data = whenline_influence[script_path][line];
+		for (int v = 0; v < num_vars; v++) {
+			const String var_name = p_data[i];
+			const uint64_t c_init    = (uint64_t)(int64_t)p_data[i + 1];
+			const uint64_t c_process = (uint64_t)(int64_t)p_data[i + 2];
+			const uint64_t c_input   = (uint64_t)(int64_t)p_data[i + 3];
+			const uint64_t c_other   = (uint64_t)(int64_t)p_data[i + 4];
+			const String last_value  = p_data[i + 5];
+			i += 6;
+
+			WhenlineInfluenceVar &var_data = line_data.variables[var_name];
+			var_data.reason_counts[WHENLINE_REASON_INIT]    += c_init;
+			var_data.reason_counts[WHENLINE_REASON_PROCESS] += c_process;
+			var_data.reason_counts[WHENLINE_REASON_INPUT]   += c_input;
+			var_data.reason_counts[WHENLINE_REASON_OTHER]   += c_other;
+			if (!last_value.is_empty()) {
+				var_data.last_value = last_value;
+			}
+			changed = true;
+		}
+	}
+
+	if (changed) {
+		emit_signal(SNAME("whenline_data_updated"));
+	}
+}
+
+Dictionary ScriptEditorDebugger::get_whenline_influence_for_line(const String &p_script_path, int p_line) const {
+	Dictionary result;
+	const auto script_it = whenline_influence.find(p_script_path);
+	if (script_it == whenline_influence.end()) {
+		return result;
+	}
+	const auto line_it = script_it->value.find(p_line);
+	if (line_it == script_it->value.end()) {
+		return result;
+	}
+	for (const KeyValue<String, WhenlineInfluenceVar> &kv : line_it->value.variables) {
+		Dictionary var_entry;
+		var_entry["count_init"]    = (int64_t)kv.value.reason_counts[1];
+		var_entry["count_process"] = (int64_t)kv.value.reason_counts[2];
+		var_entry["count_input"]   = (int64_t)kv.value.reason_counts[3];
+		var_entry["count_other"]   = (int64_t)kv.value.reason_counts[4];
+		var_entry["last_value"]    = kv.value.last_value;
+		result[kv.key] = var_entry;
 	}
 	return result;
 }
@@ -1114,6 +1176,7 @@ void ScriptEditorDebugger::_init_parse_message_handlers() {
 	parse_message_handlers["request_embed_suspend_toggle"] = &ScriptEditorDebugger::_msg_embed_suspend_toggle;
 	parse_message_handlers["request_embed_next_frame"] = &ScriptEditorDebugger::_msg_embed_next_frame;
 	parse_message_handlers["gdscript:whenline_data"] = &ScriptEditorDebugger::_msg_whenline_data;
+	parse_message_handlers["gdscript:whenline_influence"] = &ScriptEditorDebugger::_msg_whenline_influence;
 }
 
 void ScriptEditorDebugger::_set_reason_text(const String &p_reason, MessageType p_type) {

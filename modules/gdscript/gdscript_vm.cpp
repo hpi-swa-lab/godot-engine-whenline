@@ -534,6 +534,8 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 	Variant retvalue;
 	Variant *stack = nullptr;
+	uint8_t *stack_reasons = nullptr;
+	int16_t *stack_member_origins = nullptr;
 	Variant **instruction_args = nullptr;
 	int defarg = 0;
 
@@ -552,6 +554,12 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		script = p_state->script;
 		p_instance = p_state->instance;
 		defarg = p_state->defarg;
+
+		// Allocate fresh reason-tag and member-origin arrays for the resumed coroutine.
+		stack_reasons = (uint8_t *)alloca(p_state->stack_size);
+		memset(stack_reasons, 0, p_state->stack_size);
+		stack_member_origins = (int16_t *)alloca(sizeof(int16_t) * p_state->stack_size);
+		memset(stack_member_origins, 0xFF, sizeof(int16_t) * p_state->stack_size); // -1 = no origin
 
 	} else {
 		if (p_argcount != _argument_count) {
@@ -572,7 +580,7 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 			}
 		}
 
-		alloca_size = sizeof(Variant *) * FIXED_ADDRESSES_MAX + sizeof(Variant *) * _instruction_args_size + sizeof(Variant) * _stack_size;
+		alloca_size = sizeof(Variant *) * FIXED_ADDRESSES_MAX + sizeof(Variant *) * _instruction_args_size + sizeof(Variant) * _stack_size + ((_stack_size + 1) & ~1) + sizeof(int16_t) * _stack_size;
 
 		uint8_t *aptr = (uint8_t *)alloca(alloca_size);
 		stack = (Variant *)aptr;
@@ -642,6 +650,16 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 		} else {
 			instruction_args = nullptr;
 		}
+
+		// Parallel reason-tag array for the stack, used by whenline data-flow tracking.
+		// Sits at the end of the alloca block, after Variant[] and Variant*[].
+		stack_reasons = aptr + sizeof(Variant) * _stack_size + sizeof(Variant *) * _instruction_args_size;
+		memset(stack_reasons, 0, _stack_size);
+
+		// Parallel member-origin array: tracks which member variable (by index) is the
+		// ultimate source of each stack slot's value. -1 means unknown/literal/multiple.
+		stack_member_origins = (int16_t *)(stack_reasons + ((_stack_size + 1) & ~1));
+		memset(stack_member_origins, 0xFF, sizeof(int16_t) * _stack_size); // -1 = no origin
 
 		for (const KeyValue<int, Variant::Type> &E : temporary_slots) {
 			type_init_function_table[E.value](&stack[E.key]);
@@ -741,6 +759,148 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	bool awaited = false;
 	Variant *variant_addresses[ADDR_TYPE_MAX] = { stack, _constants_ptr, p_instance ? p_instance->members.ptrw() : nullptr };
 
+	// Parallel reason-tag addresses, indexed by ADDR_TYPE_*.
+	// stack_reasons for STACK, nullptr for CONSTANT (no tags), member_write_reasons for MEMBER.
+	uint8_t *reason_addresses[ADDR_TYPE_MAX] = {
+		stack_reasons,
+		nullptr,
+		p_instance ? p_instance->member_write_reasons.ptrw() : nullptr
+	};
+	static thread_local uint8_t _zero_reason = 0; // fallback for address types without tag arrays (constants)
+
+	// Helpers to read/write reason tags using the same address encoding as GET_VARIANT_PTR.
+	// These intentionally duplicate the address decode — it's cheap integer arithmetic,
+	// and keeping them separate from GET_VARIANT_PTR avoids touching every existing opcode.
+#define WHENLINE_REASON_PTR(m_code_ofs) \
+	([&]() -> uint8_t * { \
+		int _wr_address = _code_ptr[ip + 1 + (m_code_ofs)]; \
+		int _wr_type = (_wr_address & ADDR_TYPE_MASK) >> ADDR_BITS; \
+		int _wr_index = _wr_address & ADDR_MASK; \
+		return reason_addresses[_wr_type] ? &reason_addresses[_wr_type][_wr_index] : &_zero_reason; \
+	}())
+
+#define WHENLINE_GET_TAG(m_code_ofs) (*WHENLINE_REASON_PTR(m_code_ofs))
+#define WHENLINE_SET_TAG(m_code_ofs, m_tag) \
+	{ *WHENLINE_REASON_PTR(m_code_ofs) = (m_tag); }
+
+	// Check whether an operand addresses a member variable; if so, record
+	// the (member_index, reason_tag) pair for per-variable influence tracking.
+	// The buffer is flushed at each OPCODE_LINE.
+	struct WhenlineMemberRead {
+		int member_index;
+		uint8_t reason_tag;
+		String value_str; // Stringified value captured at read time
+	};
+	static constexpr int WHENLINE_MAX_MEMBER_READS = 64;
+	WhenlineMemberRead _whenline_member_reads[WHENLINE_MAX_MEMBER_READS];
+	int _whenline_member_read_count = 0;
+
+	// Track the previous line so we flush accumulated reads to the correct line.
+	StringName _whenline_prev_source;
+	int _whenline_prev_line = 0;
+
+	// Branch context stack: when JUMP_IF_NOT falls through (branch body entered),
+	// we snapshot the accumulated member reads. At each OPCODE_LINE within the
+	// branch body, these are flushed to the current line so the user sees
+	// "this line executed because <var> was <value>" even for lines that don't
+	// directly reference the condition variable. The context expires when
+	// ip advances past end_ip (the JUMP_IF_NOT's jump target = first instruction
+	// after the branch body). For loops, an existing context with the same
+	// end_ip is reused instead of pushing a duplicate.
+	static constexpr int WHENLINE_MAX_BRANCH_READS = 8;
+	struct WhenlineBranchContext {
+		WhenlineMemberRead reads[WHENLINE_MAX_BRANCH_READS];
+		int read_count = 0;
+		int end_ip = 0;
+	};
+	static constexpr int WHENLINE_MAX_BRANCH_DEPTH = 8;
+	WhenlineBranchContext _whenline_branch_stack[WHENLINE_MAX_BRANCH_DEPTH];
+	int _whenline_branch_depth = 0;
+
+#define WHENLINE_CHECK_MEMBER_READ(m_code_ofs) \
+	{ \
+		int _wcr_address = _code_ptr[ip + 1 + (m_code_ofs)]; \
+		int _wcr_type = (_wcr_address & ADDR_TYPE_MASK) >> ADDR_BITS; \
+		if (_wcr_type == ADDR_TYPE_MEMBER && _whenline_member_read_count < WHENLINE_MAX_MEMBER_READS) { \
+			int _wcr_index = _wcr_address & ADDR_MASK; \
+			uint8_t _wcr_tag = reason_addresses[_wcr_type] ? reason_addresses[_wcr_type][_wcr_index] : 0; \
+			if (_wcr_tag != 0) { \
+				String _wcr_val; \
+				if (p_instance && _wcr_index < p_instance->members.size()) { \
+					_wcr_val = p_instance->members[_wcr_index].stringify(); \
+					if (_wcr_val.length() > 80) { \
+						_wcr_val = _wcr_val.left(77) + "..."; \
+					} \
+				} \
+				_whenline_member_reads[_whenline_member_read_count++] = { _wcr_index, _wcr_tag, _wcr_val }; \
+			} \
+		} \
+	}
+
+	// Cache the control-flow reason for the entire function call.
+	// The root function in the call stack does not change during execution,
+	// so this is safe to compute once instead of per-opcode.
+	const uint8_t _whenline_current_reason_mask = EngineDebugger::is_active()
+			? (uint8_t)(1 << GDScriptLanguage::get_singleton()->_whenline_get_current_reason())
+			: 0;
+
+	// When writing to a member via any opcode, tag it with the current
+	// control-flow reason OR'd with the propagated source tag.
+#define WHENLINE_TAG_MEMBER_WRITE(m_code_ofs, m_source_tag) \
+	{ \
+		int _wtw_address = _code_ptr[ip + 1 + (m_code_ofs)]; \
+		int _wtw_type = (_wtw_address & ADDR_TYPE_MASK) >> ADDR_BITS; \
+		if (_wtw_type == ADDR_TYPE_MEMBER && reason_addresses[_wtw_type]) { \
+			int _wtw_index = _wtw_address & ADDR_MASK; \
+			reason_addresses[_wtw_type][_wtw_index] = _whenline_current_reason_mask | (m_source_tag); \
+		} \
+	}
+
+	// Tag a function call's return-value slot (Variant* pointing into the stack)
+	// with the current control-flow reason so that data-flow tracking picks it up
+	// when the value is later used in a branch condition or assigned to a member.
+#define WHENLINE_TAG_RETURN_VALUE(m_ret_ptr) \
+	{ \
+		if (stack_reasons && _whenline_current_reason_mask != 0) { \
+			ptrdiff_t _wtrv_idx = (m_ret_ptr) - stack; \
+			if (_wtrv_idx >= 0 && _wtrv_idx < _stack_size) { \
+				stack_reasons[_wtrv_idx] = _whenline_current_reason_mask; \
+				if (stack_member_origins) { \
+					stack_member_origins[_wtrv_idx] = -1; \
+				} \
+			} \
+		} \
+	}
+
+	// Member-origin tracking: for each stack slot, which member variable (by index)
+	// is the ultimate source of its value. Members are their own origin; constants
+	// and function-call returns have origin -1 (unknown).
+#define WHENLINE_GET_ORIGIN(m_code_ofs) \
+	([&]() -> int16_t { \
+		int _wgo_address = _code_ptr[ip + 1 + (m_code_ofs)]; \
+		int _wgo_type = (_wgo_address & ADDR_TYPE_MASK) >> ADDR_BITS; \
+		int _wgo_index = _wgo_address & ADDR_MASK; \
+		if (_wgo_type == ADDR_TYPE_MEMBER) return (int16_t)_wgo_index; \
+		if (_wgo_type == ADDR_TYPE_STACK && stack_member_origins) \
+			return stack_member_origins[_wgo_index]; \
+		return (int16_t)-1; \
+	}())
+
+#define WHENLINE_SET_ORIGIN(m_code_ofs, m_origin) \
+	{ \
+		int _wso_address = _code_ptr[ip + 1 + (m_code_ofs)]; \
+		int _wso_type = (_wso_address & ADDR_TYPE_MASK) >> ADDR_BITS; \
+		if (_wso_type == ADDR_TYPE_STACK && stack_member_origins) { \
+			int _wso_index = _wso_address & ADDR_MASK; \
+			stack_member_origins[_wso_index] = (m_origin); \
+		} \
+	}
+
+	// Merge two origins: prefer a valid one over -1; if both are valid but
+	// different, collapse to -1 (multiple members).
+#define WHENLINE_MERGE_ORIGINS(a, b) \
+	(((a) < 0) ? (b) : (((b) < 0) ? (a) : (((a) == (b)) ? (a) : (int16_t)-1)))
+
 #ifdef DEBUG_ENABLED
 	OPCODE_WHILE(ip < _code_size) {
 		int last_opcode = _code_ptr[ip];
@@ -832,6 +992,13 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					*dst = ret;
 #endif
 				}
+
+				// Propagate: output carries combined influence of both operands.
+				WHENLINE_CHECK_MEMBER_READ(0);
+				WHENLINE_CHECK_MEMBER_READ(1);
+				WHENLINE_SET_TAG(2, WHENLINE_GET_TAG(0) | WHENLINE_GET_TAG(1));
+				WHENLINE_SET_ORIGIN(2, WHENLINE_MERGE_ORIGINS(WHENLINE_GET_ORIGIN(0), WHENLINE_GET_ORIGIN(1)));
+
 				ip += 7 + _pointer_size;
 			}
 			DISPATCH_OPCODE;
@@ -842,12 +1009,17 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				int operator_idx = _code_ptr[ip + 4];
 				GD_ERR_BREAK(operator_idx < 0 || operator_idx >= _operator_funcs_count);
 				Variant::ValidatedOperatorEvaluator operator_func = _operator_funcs_ptr[operator_idx];
-
 				GET_VARIANT_PTR(a, 0);
 				GET_VARIANT_PTR(b, 1);
 				GET_VARIANT_PTR(dst, 2);
 
 				operator_func(a, b, dst);
+
+				// Propagate: output carries combined influence of both operands.
+				WHENLINE_CHECK_MEMBER_READ(0);
+				WHENLINE_CHECK_MEMBER_READ(1);
+				WHENLINE_SET_TAG(2, WHENLINE_GET_TAG(0) | WHENLINE_GET_TAG(1));
+				WHENLINE_SET_ORIGIN(2, WHENLINE_MERGE_ORIGINS(WHENLINE_GET_ORIGIN(0), WHENLINE_GET_ORIGIN(1)));
 
 				ip += 5;
 			}
@@ -1379,6 +1551,13 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				*dst = *src;
 
+				// Propagate reason tag from source to destination.
+				WHENLINE_CHECK_MEMBER_READ(1);
+				uint8_t _src_tag = WHENLINE_GET_TAG(1);
+				WHENLINE_SET_TAG(0, _src_tag);
+				WHENLINE_SET_ORIGIN(0, WHENLINE_GET_ORIGIN(1));
+				WHENLINE_TAG_MEMBER_WRITE(0, _src_tag);
+
 				ip += 3;
 			}
 			DISPATCH_OPCODE;
@@ -1388,6 +1567,11 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GET_VARIANT_PTR(dst, 0);
 
 				*dst = Variant();
+
+				// Literal assignment: tag with control-flow reason only.
+				WHENLINE_SET_TAG(0, 0);
+				WHENLINE_SET_ORIGIN(0, -1);
+				WHENLINE_TAG_MEMBER_WRITE(0, 0);
 
 				ip += 2;
 			}
@@ -1399,6 +1583,10 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				*dst = true;
 
+				WHENLINE_SET_TAG(0, 0);
+				WHENLINE_SET_ORIGIN(0, -1);
+				WHENLINE_TAG_MEMBER_WRITE(0, 0);
+
 				ip += 2;
 			}
 			DISPATCH_OPCODE;
@@ -1408,6 +1596,10 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				GET_VARIANT_PTR(dst, 0);
 
 				*dst = false;
+
+				WHENLINE_SET_TAG(0, 0);
+				WHENLINE_SET_ORIGIN(0, -1);
+				WHENLINE_TAG_MEMBER_WRITE(0, 0);
 
 				ip += 2;
 			}
@@ -1436,6 +1628,15 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				} else {
 #endif // DEBUG_ENABLED
 					*dst = *src;
+				}
+
+				// Propagate reason tag (same as OPCODE_ASSIGN).
+				WHENLINE_CHECK_MEMBER_READ(1);
+				{
+					uint8_t _src_tag = WHENLINE_GET_TAG(1);
+					WHENLINE_SET_TAG(0, _src_tag);
+					WHENLINE_SET_ORIGIN(0, WHENLINE_GET_ORIGIN(1));
+					WHENLINE_TAG_MEMBER_WRITE(0, _src_tag);
 				}
 
 				ip += 4;
@@ -1472,6 +1673,15 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				}
 
 				*dst = *src;
+
+				// Propagate reason tag (same as OPCODE_ASSIGN).
+				WHENLINE_CHECK_MEMBER_READ(1);
+				{
+					uint8_t _src_tag = WHENLINE_GET_TAG(1);
+					WHENLINE_SET_TAG(0, _src_tag);
+					WHENLINE_SET_ORIGIN(0, WHENLINE_GET_ORIGIN(1));
+					WHENLINE_TAG_MEMBER_WRITE(0, _src_tag);
+				}
 
 				ip += 6;
 			}
@@ -1517,6 +1727,15 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				*dst = *src;
 
+				// Propagate reason tag (same as OPCODE_ASSIGN).
+				WHENLINE_CHECK_MEMBER_READ(1);
+				{
+					uint8_t _src_tag = WHENLINE_GET_TAG(1);
+					WHENLINE_SET_TAG(0, _src_tag);
+					WHENLINE_SET_ORIGIN(0, WHENLINE_GET_ORIGIN(1));
+					WHENLINE_TAG_MEMBER_WRITE(0, _src_tag);
+				}
+
 				ip += 9;
 			}
 			DISPATCH_OPCODE;
@@ -1552,6 +1771,15 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				}
 #endif // DEBUG_ENABLED
 				*dst = *src;
+
+				// Propagate reason tag (same as OPCODE_ASSIGN).
+				WHENLINE_CHECK_MEMBER_READ(1);
+				{
+					uint8_t _src_tag = WHENLINE_GET_TAG(1);
+					WHENLINE_SET_TAG(0, _src_tag);
+					WHENLINE_SET_ORIGIN(0, WHENLINE_GET_ORIGIN(1));
+					WHENLINE_TAG_MEMBER_WRITE(0, _src_tag);
+				}
 
 				ip += 4;
 			}
@@ -1611,6 +1839,15 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				*dst = *src;
 
+				// Propagate reason tag (same as OPCODE_ASSIGN).
+				WHENLINE_CHECK_MEMBER_READ(1);
+				{
+					uint8_t _src_tag = WHENLINE_GET_TAG(1);
+					WHENLINE_SET_TAG(0, _src_tag);
+					WHENLINE_SET_ORIGIN(0, WHENLINE_GET_ORIGIN(1));
+					WHENLINE_TAG_MEMBER_WRITE(0, _src_tag);
+				}
+
 				ip += 4;
 			}
 			DISPATCH_OPCODE;
@@ -1639,6 +1876,12 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					OPCODE_BREAK;
 				}
 #endif
+
+				// Propagate: cast result carries source's influence.
+				WHENLINE_CHECK_MEMBER_READ(0);
+				WHENLINE_SET_TAG(1, WHENLINE_GET_TAG(0));
+				WHENLINE_SET_ORIGIN(1, WHENLINE_GET_ORIGIN(0));
+				WHENLINE_TAG_MEMBER_WRITE(1, WHENLINE_GET_TAG(0));
 
 				ip += 4;
 			}
@@ -1670,6 +1913,12 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				} else {
 					*dst = *src;
 				}
+
+				// Propagate: cast result carries source's influence.
+				WHENLINE_CHECK_MEMBER_READ(0);
+				WHENLINE_SET_TAG(1, WHENLINE_GET_TAG(0));
+				WHENLINE_SET_ORIGIN(1, WHENLINE_GET_ORIGIN(0));
+				WHENLINE_TAG_MEMBER_WRITE(1, WHENLINE_GET_TAG(0));
 
 				ip += 4;
 			}
@@ -1719,6 +1968,12 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				} else {
 					*dst = Variant(); // invalid cast, assign NULL
 				}
+
+				// Propagate: cast result carries source's influence.
+				WHENLINE_CHECK_MEMBER_READ(0);
+				WHENLINE_SET_TAG(1, WHENLINE_GET_TAG(0));
+				WHENLINE_SET_ORIGIN(1, WHENLINE_GET_ORIGIN(0));
+				WHENLINE_TAG_MEMBER_WRITE(1, WHENLINE_GET_TAG(0));
 
 				ip += 4;
 			}
@@ -2013,6 +2268,11 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				}
 #endif // DEBUG_ENABLED
 
+				// Tag call return value with control-flow reason for data-flow tracking.
+				if (call_ret) {
+					WHENLINE_TAG_RETURN_VALUE(instruction_args[argc + 1]);
+				}
+
 				ip += 3;
 			}
 			DISPATCH_OPCODE;
@@ -2100,6 +2360,11 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					OPCODE_BREAK;
 				}
 #endif
+				// Tag call return value with control-flow reason for data-flow tracking.
+				if (call_ret) {
+					WHENLINE_TAG_RETURN_VALUE(instruction_args[argc + 1]);
+				}
+
 				ip += 3;
 			}
 			DISPATCH_OPCODE;
@@ -2310,6 +2575,9 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 					function_call_time += t_taken;
 				}
 #endif
+
+				// Tag call return value with control-flow reason for data-flow tracking.
+				WHENLINE_TAG_RETURN_VALUE(instruction_args[argc + 1]);
 
 				ip += 3;
 			}
@@ -2740,6 +3008,33 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				GET_VARIANT_PTR(test, 0);
 
+				// Track member variable reads in branch conditions.
+				WHENLINE_CHECK_MEMBER_READ(0);
+
+				// Also check if the test operand is a stack variable whose value
+				// ultimately came from a member (e.g. `var x = my_member; if x > 5:`).
+				{
+					int _jt_addr = _code_ptr[ip + 1];
+					int _jt_type = (_jt_addr & ADDR_TYPE_MASK) >> ADDR_BITS;
+					if (_jt_type == ADDR_TYPE_STACK && stack_member_origins && stack_reasons) {
+						int _jt_idx = _jt_addr & ADDR_MASK;
+						int16_t _jt_origin = stack_member_origins[_jt_idx];
+						if (_jt_origin >= 0 && _whenline_member_read_count < WHENLINE_MAX_MEMBER_READS) {
+							uint8_t _jt_tag = stack_reasons[_jt_idx];
+							if (_jt_tag != 0) {
+								String _jt_val;
+								if (p_instance && _jt_origin < p_instance->members.size()) {
+									_jt_val = p_instance->members[_jt_origin].stringify();
+									if (_jt_val.length() > 80) {
+										_jt_val = _jt_val.left(77) + "...";
+									}
+								}
+								_whenline_member_reads[_whenline_member_read_count++] = { (int)_jt_origin, _jt_tag, _jt_val };
+							}
+						}
+					}
+				}
+
 				bool result = test->booleanize();
 
 				if (result) {
@@ -2757,13 +3052,93 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 
 				GET_VARIANT_PTR(test, 0);
 
+				// Track member variable reads in branch conditions.
+				WHENLINE_CHECK_MEMBER_READ(0);
+
+				// Also check if the test operand is a stack variable whose value
+				// ultimately came from a member (e.g. `var x = my_member; if x > 5:`).
+				{
+					int _jt_addr = _code_ptr[ip + 1];
+					int _jt_type = (_jt_addr & ADDR_TYPE_MASK) >> ADDR_BITS;
+					if (_jt_type == ADDR_TYPE_STACK && stack_member_origins && stack_reasons) {
+						int _jt_idx = _jt_addr & ADDR_MASK;
+						int16_t _jt_origin = stack_member_origins[_jt_idx];
+						if (_jt_origin >= 0 && _whenline_member_read_count < WHENLINE_MAX_MEMBER_READS) {
+							uint8_t _jt_tag = stack_reasons[_jt_idx];
+							if (_jt_tag != 0) {
+								String _jt_val;
+								if (p_instance && _jt_origin < p_instance->members.size()) {
+									_jt_val = p_instance->members[_jt_origin].stringify();
+									if (_jt_val.length() > 80) {
+										_jt_val = _jt_val.left(77) + "...";
+									}
+								}
+								_whenline_member_reads[_whenline_member_read_count++] = { (int)_jt_origin, _jt_tag, _jt_val };
+							}
+						}
+					}
+				}
+
 				bool result = test->booleanize();
 
 				if (!result) {
 					int to = _code_ptr[ip + 2];
 					GD_ERR_BREAK(to < 0 || to > _code_size);
+
+					// Else-branch support: if the instruction immediately before the
+					// jump target is an unconditional JUMP (the end of the if-body),
+					// that JUMP's target marks the end of the else-body. This lets us
+					// push a branch context for the else path too.
+					if (_whenline_member_read_count > 0 && to >= 2 && _code_ptr[to - 2] == OPCODE_JUMP) {
+						int _else_end = _code_ptr[to - 1];
+						int _slot = -1;
+						for (int _bi = 0; _bi < _whenline_branch_depth; _bi++) {
+							if (_whenline_branch_stack[_bi].end_ip == _else_end) {
+								_slot = _bi;
+								break;
+							}
+						}
+						if (_slot < 0 && _whenline_branch_depth < WHENLINE_MAX_BRANCH_DEPTH) {
+							_slot = _whenline_branch_depth++;
+						}
+						if (_slot >= 0) {
+							WhenlineBranchContext &ctx = _whenline_branch_stack[_slot];
+							ctx.end_ip = _else_end;
+							ctx.read_count = MIN(_whenline_member_read_count, WHENLINE_MAX_BRANCH_READS);
+							for (int _bc = 0; _bc < ctx.read_count; _bc++) {
+								ctx.reads[_bc] = _whenline_member_reads[_bc];
+							}
+						}
+					}
+
 					ip = to;
 				} else {
+					// Branch body entered: snapshot accumulated member reads as a
+					// branch context so that every line within the body inherits
+					// the condition's variable influences.
+					if (_whenline_member_read_count > 0) {
+						int _branch_end = _code_ptr[ip + 2];
+						// Reuse an existing context with the same end_ip (loop re-entry)
+						// instead of pushing a duplicate.
+						int _slot = -1;
+						for (int _bi = 0; _bi < _whenline_branch_depth; _bi++) {
+							if (_whenline_branch_stack[_bi].end_ip == _branch_end) {
+								_slot = _bi;
+								break;
+							}
+						}
+						if (_slot < 0 && _whenline_branch_depth < WHENLINE_MAX_BRANCH_DEPTH) {
+							_slot = _whenline_branch_depth++;
+						}
+						if (_slot >= 0) {
+							WhenlineBranchContext &ctx = _whenline_branch_stack[_slot];
+							ctx.end_ip = _branch_end;
+							ctx.read_count = MIN(_whenline_member_read_count, WHENLINE_MAX_BRANCH_READS);
+							for (int _bc = 0; _bc < ctx.read_count; _bc++) {
+								ctx.reads[_bc] = _whenline_member_reads[_bc];
+							}
+						}
+					}
 					ip += 3;
 				}
 			}
@@ -3905,9 +4280,57 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 				ip += 2;
 
 				if (EngineDebugger::is_active()) {
-					// Whenline execution recording
-					// @TODO look up stack trace here
+					// Flush accumulated member-read influences to the PREVIOUS line
+					// (reads between two LINE opcodes belong to the earlier line).
+					if (_whenline_member_read_count > 0 && p_instance && _whenline_prev_line != 0) {
+						for (int _wf = 0; _wf < _whenline_member_read_count; _wf++) {
+							const WhenlineMemberRead &rd = _whenline_member_reads[_wf];
+							StringName var_name = p_instance->script->debug_get_member_by_index(rd.member_index);
+							if (var_name != StringName()) {
+								GDScriptLanguage::get_singleton()->_whenline_record_influence(
+										_whenline_prev_source, _whenline_prev_line, var_name, rd.reason_tag, rd.value_str);
+							}
+						}
+						_whenline_member_read_count = 0;
+					}
+
+					// 2. Pop expired branch contexts (we've left their branch body).
+					//    A context expires when ip (already advanced past this LINE
+					//    opcode) has moved past the JUMP_IF_NOT's target address.
+					{
+						int _new_depth = 0;
+						for (int _bi = 0; _bi < _whenline_branch_depth; _bi++) {
+							if (_whenline_branch_stack[_bi].end_ip >= ip) {
+								if (_new_depth != _bi) {
+									_whenline_branch_stack[_new_depth] = _whenline_branch_stack[_bi];
+								}
+								_new_depth++;
+							}
+						}
+						_whenline_branch_depth = _new_depth;
+					}
+
+					// 3. Record the new line and update prev tracking.
+					_whenline_prev_source = source;
+					_whenline_prev_line = line;
 					GDScriptLanguage::get_singleton()->_whenline_record_line(source, line, OS::get_singleton()->get_ticks_usec());
+
+					// 4. Flush active branch context influences to the CURRENT line.
+					//    This propagates the condition variable(s) that caused this
+					//    branch to execute to every line within the branch body.
+					if (_whenline_branch_depth > 0 && p_instance) {
+						for (int _bi = 0; _bi < _whenline_branch_depth; _bi++) {
+							const WhenlineBranchContext &ctx = _whenline_branch_stack[_bi];
+							for (int _bf = 0; _bf < ctx.read_count; _bf++) {
+								const WhenlineMemberRead &rd = ctx.reads[_bf];
+								StringName var_name = p_instance->script->debug_get_member_by_index(rd.member_index);
+								if (var_name != StringName()) {
+									GDScriptLanguage::get_singleton()->_whenline_record_influence(
+											source, line, var_name, rd.reason_tag, rd.value_str);
+								}
+							}
+						}
+					}
 
 					// line
 					bool do_break = false;

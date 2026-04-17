@@ -244,6 +244,7 @@ private:
 	void _msg_embed_suspend_toggle(uint64_t p_thread_id, const Array &p_data);
 	void _msg_embed_next_frame(uint64_t p_thread_id, const Array &p_data);
 	void _msg_whenline_data(uint64_t p_thread_id, const Array &p_data);
+	void _msg_whenline_influence(uint64_t p_thread_id, const Array &p_data);
 
 	void _parse_message(const String &p_msg, uint64_t p_thread_id, const Array &p_data);
 	void _set_reason_text(const String &p_reason, MessageType p_type);
@@ -310,6 +311,18 @@ private:
 		uint64_t reason_counts[5] = {};
 	};
 	HashMap<String, HashMap<int, WhenlineEditorEntry>> whenline_data;
+
+	// Data-flow influence: which member variables influenced each line,
+	// and what reason categories those members carry.
+	struct WhenlineInfluenceVar {
+		uint64_t reason_counts[5] = {}; // indexed by WhenlineReason (1=INIT, 2=PROCESS, 3=INPUT, 4=OTHER)
+		String last_value; // Most recently seen stringified value
+	};
+	struct WhenlineInfluenceLineData {
+		HashMap<String, WhenlineInfluenceVar> variables; // var_name → per-reason counts
+	};
+	HashMap<String, HashMap<int, WhenlineInfluenceLineData>> whenline_influence;
+
 	void _whenline_clear_session_data();
 
 	void _set_breakpoint(const String &p_path, const int &p_line, const bool &p_enabled);
@@ -413,6 +426,7 @@ public:
 	void send_message(const String &p_message, const Array &p_args);
 
 	Dictionary get_whenline_data_for_script(const String &p_script_path) const;
+	Dictionary get_whenline_influence_for_line(const String &p_script_path, int p_line) const;
 	void toggle_profiler(const String &p_profiler, bool p_enable, const Array &p_data);
 
 	ScriptEditorDebugger();

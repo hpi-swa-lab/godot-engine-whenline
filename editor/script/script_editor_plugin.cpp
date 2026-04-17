@@ -261,7 +261,14 @@ void ScriptEditor::_update_whenline_gutters(int p_debugger) {
 			// we start at line 1 (code_edit starts at line 0)
 			const int key = ln + 1;
 			if (line_data.has(key)) {
-				code_edit->set_line_gutter_metadata(ln, code_edit->get_whenline_gutter_index(), line_data[key]);
+				Dictionary meta = line_data[key];
+				// Merge per-variable data-flow influence into the same Dictionary
+				// so the gutter draw callback and tooltip can access everything in one place.
+				Dictionary influence = dbg->get_whenline_influence_for_line(script_path, key);
+				if (!influence.is_empty()) {
+					meta["influence"] = influence;
+				}
+				code_edit->set_line_gutter_metadata(ln, code_edit->get_whenline_gutter_index(), meta);
 			} else {
 				// clear stuff from last run
 				code_edit->set_line_gutter_metadata(ln, code_edit->get_whenline_gutter_index(), Variant());

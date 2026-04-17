@@ -155,6 +155,8 @@ GDScriptInstance *GDScript::_create_instance(const Variant **p_args, int p_argco
 
 	GDScriptInstance *instance = memnew(GDScriptInstance);
 	instance->members.resize(member_indices.size());
+	instance->member_write_reasons.resize(member_indices.size());
+	instance->member_write_reasons.fill(0);
 	instance->script = Ref<GDScript>(this);
 	instance->owner = p_owner;
 	instance->owner_id = p_owner->get_instance_id();
@@ -2013,6 +2015,9 @@ void GDScriptInstance::reload_members() {
 	//apply
 	members = new_members;
 
+	member_write_reasons.resize(new_members.size());
+	member_write_reasons.fill(0);
+
 	//pass the values to the new indices
 	member_indices_cache.clear();
 	for (const KeyValue<StringName, GDScript::MemberInfo> &E : script->member_indices) {
@@ -2594,6 +2599,9 @@ void GDScriptLanguage::frame() {
 	if (!_whenline_pending.is_empty() && EngineDebugger::is_active()) {
 		_whenline_flush();
 	}
+	if (!_whenline_influence_pending.is_empty() && EngineDebugger::is_active()) {
+		_whenline_flush_influence();
+	}
 }
 
 GDScriptLanguage::WhenlineReason GDScriptLanguage::_whenline_classify_function_name(const StringName &p_name) {
@@ -2709,6 +2717,54 @@ void GDScriptLanguage::_whenline_flush() {
 void GDScriptLanguage::_whenline_clear() {
 	MutexLock lock(mutex);
 	_whenline_pending.clear();
+	_whenline_influence_pending.clear();
+}
+
+void GDScriptLanguage::_whenline_record_influence(const StringName &p_source, int p_line, const StringName &p_var_name, uint8_t p_reason_mask, const String &p_value) {
+	MutexLock lock(mutex);
+	WhenlineInfluenceLine &line_data = _whenline_influence_pending[p_source][p_line];
+	WhenlineInfluenceVar &var_data = line_data.variables[p_var_name];
+	for (int r = 1; r <= 4; r++) {
+		if (p_reason_mask & (1 << r)) {
+			var_data.reason_counts[r]++;
+		}
+	}
+	if (!p_value.is_empty()) {
+		var_data.last_value = p_value;
+	}
+}
+
+void GDScriptLanguage::_whenline_flush_influence() {
+	HashMap<StringName, HashMap<int, WhenlineInfluenceLine>> to_send;
+	{
+		MutexLock lock(mutex);
+		to_send = std::move(_whenline_influence_pending);
+		_whenline_influence_pending.clear();
+	}
+
+	if (to_send.is_empty()) {
+		return;
+	}
+
+	// Wire format: flat array of [script_path, line, num_vars, var_name, c_init, c_process, c_input, c_other, last_value, ...]
+	Array payload;
+	for (const KeyValue<StringName, HashMap<int, WhenlineInfluenceLine>> &script_kv : to_send) {
+		for (const KeyValue<int, WhenlineInfluenceLine> &line_kv : script_kv.value) {
+			payload.push_back(String(script_kv.key));
+			payload.push_back(line_kv.key);
+			payload.push_back((int64_t)line_kv.value.variables.size());
+			for (const KeyValue<StringName, WhenlineInfluenceVar> &var_kv : line_kv.value.variables) {
+				payload.push_back(String(var_kv.key));
+				payload.push_back((int64_t)var_kv.value.reason_counts[1]);
+				payload.push_back((int64_t)var_kv.value.reason_counts[2]);
+				payload.push_back((int64_t)var_kv.value.reason_counts[3]);
+				payload.push_back((int64_t)var_kv.value.reason_counts[4]);
+				payload.push_back(var_kv.value.last_value);
+			}
+		}
+	}
+
+	EngineDebugger::get_singleton()->send_message("gdscript:whenline_influence", payload);
 }
 
 /* EDITOR FUNCTIONS */

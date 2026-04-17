@@ -2140,6 +2140,7 @@ String CodeEdit::get_tooltip(const Point2 &p_pos) const {
 		{ "count_other", "Signal or Notification" },
 	};
 
+	// Control-flow breakdown.
 	String reasons;
 	int reason_count = 0;
 	for (const ReasonEntry &entry : reason_entries) {
@@ -2155,10 +2156,53 @@ String CodeEdit::get_tooltip(const Point2 &p_pos) const {
 
 	const String count_line = "Executed " + String::num_int64(count) + " times";
 
-	if (reason_count <= 1) {
-		return count_line;
+	String tooltip = count_line;
+	if (reason_count > 1) {
+		tooltip += "\n" + TTR("Triggered from:") + "\n" + reasons;
 	}
-	return count_line + "\n" + TTR("Triggered from:") + "\n" + reasons;
+
+	// Data-flow influence: per-variable breakdown.
+	// The "influence" key is a Dictionary of var_name → { count_init, count_process, count_input, count_other, last_value }.
+	const Dictionary influence = d.get("influence", Dictionary());
+	if (!influence.is_empty()) {
+		String influence_lines;
+		const Array var_names = influence.keys();
+		for (int vi = 0; vi < var_names.size(); vi++) {
+			const String var_name = var_names[vi];
+			const Dictionary var_data = influence[var_name];
+
+			// Show last-seen value if available.
+			const String last_value = var_data.get("last_value", String());
+
+			// Build a compact list of the reasons that influenced this variable.
+			String var_reasons;
+			for (const ReasonEntry &entry : reason_entries) {
+				const int64_t rc = (int64_t)var_data.get(entry.count_key, (int64_t)0);
+				if (rc > 0) {
+					if (!var_reasons.is_empty()) {
+						var_reasons += ", ";
+					}
+					var_reasons += entry.label + " (" + String::num_int64(rc) + ")";
+				}
+			}
+			if (!var_reasons.is_empty()) {
+				if (!influence_lines.is_empty()) {
+					influence_lines += "\n";
+				}
+				String var_line = " - " + var_name;
+				if (!last_value.is_empty()) {
+					var_line += " = " + last_value;
+				}
+				var_line += "  [" + var_reasons + "]";
+				influence_lines += var_line;
+			}
+		}
+		if (!influence_lines.is_empty()) {
+			tooltip += "\n" + TTR("Variable influences:") + "\n" + influence_lines;
+		}
+	}
+
+	return tooltip;
 }
 
 /* Delimiters */

@@ -363,6 +363,9 @@ class GDScriptInstance : public ScriptInstance {
 	HashMap<StringName, int> member_indices_cache; //used only for hot script reloading
 #endif
 	Vector<Variant> members;
+	// Parallel to `members`: tracks which WhenlineReason category last wrote each member.
+	// Stored as a bitmask (bit N = 1 << WhenlineReason(N)) to capture multi-source values.
+	Vector<uint8_t> member_write_reasons;
 
 	SelfList<GDScriptFunctionState>::List pending_func_states;
 
@@ -485,6 +488,20 @@ class GDScriptLanguage : public ScriptLanguage {
 	void _whenline_record_line(const StringName &p_source, int p_line, uint64_t p_usec);
 	void _whenline_flush(); // call each frame
 	void _whenline_clear(); // call each session
+
+	// Data-flow influence tracking: records which member variables influenced each
+	// line's execution, and what reason categories those members carry.
+	struct WhenlineInfluenceVar {
+		uint64_t reason_counts[5] = {}; // indexed by WhenlineReason
+		String last_value; // Most recently seen stringified value
+	};
+	struct WhenlineInfluenceLine {
+		HashMap<StringName, WhenlineInfluenceVar> variables; // var_name → per-reason counts
+	};
+	HashMap<StringName, HashMap<int, WhenlineInfluenceLine>> _whenline_influence_pending;
+
+	void _whenline_record_influence(const StringName &p_source, int p_line, const StringName &p_var_name, uint8_t p_reason_mask, const String &p_value);
+	void _whenline_flush_influence();
 
 	HashMap<String, ObjectID> orphan_subclasses;
 
