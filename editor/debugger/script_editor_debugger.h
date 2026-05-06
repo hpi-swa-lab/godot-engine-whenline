@@ -245,6 +245,7 @@ private:
 	void _msg_embed_next_frame(uint64_t p_thread_id, const Array &p_data);
 	void _msg_whenline_data(uint64_t p_thread_id, const Array &p_data);
 	void _msg_whenline_influence(uint64_t p_thread_id, const Array &p_data);
+	void _msg_whenline_diff(uint64_t p_thread_id, const Array &p_data);
 
 	void _parse_message(const String &p_msg, uint64_t p_thread_id, const Array &p_data);
 	void _set_reason_text(const String &p_reason, MessageType p_type);
@@ -322,6 +323,25 @@ private:
 		HashMap<String, WhenlineInfluenceVar> variables; // var_name → per-reason counts
 	};
 	HashMap<String, HashMap<int, WhenlineInfluenceLineData>> whenline_influence;
+
+	// Tracks lines flagged by `gdscript:whenline_diff` (sent after every
+	// successful hot-reload). Each watch records the lines we want to see
+	// executed and the deadline by which they must be hit. When the deadline
+	// passes and any expected line is still un-hit, we emit
+	// `whenline_changes_unexecuted` so the editor can show a popup.
+	struct WhenlineDiffWatch {
+		HashSet<int> expected_lines; // Shrinks as lines are observed running.
+		HashSet<int> all_changed_lines; // Pristine copy for the popup payload.
+		uint64_t deadline_msec = 0;
+		bool reported = false;
+	};
+	HashMap<String, WhenlineDiffWatch> whenline_diff_watches;
+
+	// How long we wait for changed lines to execute before alerting the user.
+	static constexpr uint64_t WHENLINE_DIFF_WAIT_MSEC = 10'000;
+
+	void _whenline_diff_observe_line_hit(const String &p_script_path, int p_line);
+	void _whenline_diff_check_deadlines();
 
 	void _whenline_clear_session_data();
 

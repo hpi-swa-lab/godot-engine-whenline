@@ -1026,6 +1026,12 @@ void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array 
 			it->value.reason_counts[WHENLINE_REASON_INPUT] += incoming_count_input;
 			it->value.reason_counts[WHENLINE_REASON_OTHER] += incoming_count_other;
 		}
+		// Notify any active reload-diff watch that this line just ran. Doing
+		// this on every incoming sample (rather than only on the first hit)
+		// keeps the cost trivial: `_whenline_diff_observe_line_hit` short-
+		// circuits as soon as the line is no longer in `expected_lines`.
+		_whenline_diff_observe_line_hit(script_path, line);
+
 		changed = true;
 	}
 
@@ -1034,9 +1040,104 @@ void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array 
 	}
 }
 
+void ScriptEditorDebugger::_msg_whenline_diff(uint64_t p_thread_id, const Array &p_data) {
+	// Wire format: [script_path, num_lines, line, line, ...]. See
+	// `GDScript::_whenline_emit_reload_diff` for the producer side.
+	ERR_FAIL_COND(p_data.size() < 2);
+	ERR_FAIL_COND(p_data[0].get_type() != Variant::STRING);
+	ERR_FAIL_COND(p_data[1].get_type() != Variant::INT);
+
+	const String script_path = p_data[0];
+	const int num_lines = (int)(int64_t)p_data[1];
+	ERR_FAIL_COND(num_lines < 0);
+	ERR_FAIL_COND(p_data.size() < 2 + num_lines);
+
+	WhenlineDiffWatch watch;
+	watch.deadline_msec = OS::get_singleton()->get_ticks_msec() + WHENLINE_DIFF_WAIT_MSEC;
+	watch.reported = false;
+	for (int i = 0; i < num_lines; i++) {
+		ERR_FAIL_COND(p_data[2 + i].get_type() != Variant::INT);
+		const int line = (int)(int64_t)p_data[2 + i];
+		watch.expected_lines.insert(line);
+		watch.all_changed_lines.insert(line);
+	}
+
+	// Replace any prior watch for this script: a fresh diff means the user
+	// just edited the file again, and we should restart the timer with the
+	// most recent set of changes.
+	whenline_diff_watches[script_path] = watch;
+}
+
+void ScriptEditorDebugger::_whenline_diff_observe_line_hit(const String &p_script_path, int p_line) {
+	HashMap<String, WhenlineDiffWatch>::Iterator it = whenline_diff_watches.find(p_script_path);
+	if (it == whenline_diff_watches.end()) {
+		return;
+	}
+	it->value.expected_lines.erase(p_line);
+}
+
+void ScriptEditorDebugger::_whenline_diff_check_deadlines() {
+	if (whenline_diff_watches.is_empty()) {
+		return;
+	}
+	const uint64_t now_msec = OS::get_singleton()->get_ticks_msec();
+
+	// Two-pass: first detect expirations and emit signals (or clear watches
+	// that fully ran), then erase the resolved entries. Mutating the map
+	// during the iteration would be undefined.
+	List<String> to_erase;
+	for (KeyValue<String, WhenlineDiffWatch> &kv : whenline_diff_watches) {
+		WhenlineDiffWatch &watch = kv.value;
+
+		// Every changed line ran in time — we don't need to report anything.
+		if (watch.expected_lines.is_empty()) {
+			to_erase.push_back(kv.key);
+			continue;
+		}
+
+		if (now_msec < watch.deadline_msec) {
+			continue; // Still waiting.
+		}
+
+		if (!watch.reported) {
+			watch.reported = true;
+			// Build the unhit-lines payload as a sorted PackedInt32Array. Same
+			// idea as on the engine side: editor consumers want a stable order.
+			Vector<int> unhit;
+			unhit.resize(watch.expected_lines.size());
+			{
+				int *w = unhit.ptrw();
+				int i = 0;
+				for (int l : watch.expected_lines) {
+					w[i++] = l;
+				}
+			}
+			unhit.sort();
+			PackedInt32Array unhit_packed;
+			unhit_packed.resize(unhit.size());
+			{
+				int32_t *w = unhit_packed.ptrw();
+				for (int i = 0; i < unhit.size(); i++) {
+					w[i] = unhit[i];
+				}
+			}
+			emit_signal(SNAME("whenline_changes_unexecuted"), kv.key, unhit_packed);
+		}
+
+		// Once reported, drop the watch. If the user edits the file again a
+		// new diff will arrive and replace the entry from scratch.
+		to_erase.push_back(kv.key);
+	}
+
+	for (const String &key : to_erase) {
+		whenline_diff_watches.erase(key);
+	}
+}
+
 void ScriptEditorDebugger::_whenline_clear_session_data() {
 	whenline_data.clear();
 	whenline_influence.clear();
+	whenline_diff_watches.clear();
 	emit_signal(SNAME("whenline_data_updated"));
 }
 
@@ -1177,6 +1278,7 @@ void ScriptEditorDebugger::_init_parse_message_handlers() {
 	parse_message_handlers["request_embed_next_frame"] = &ScriptEditorDebugger::_msg_embed_next_frame;
 	parse_message_handlers["gdscript:whenline_data"] = &ScriptEditorDebugger::_msg_whenline_data;
 	parse_message_handlers["gdscript:whenline_influence"] = &ScriptEditorDebugger::_msg_whenline_influence;
+	parse_message_handlers["gdscript:whenline_diff"] = &ScriptEditorDebugger::_msg_whenline_diff;
 }
 
 void ScriptEditorDebugger::_set_reason_text(const String &p_reason, MessageType p_type) {
@@ -1297,6 +1399,10 @@ void ScriptEditorDebugger::_notification(int p_what) {
 		} break;
 
 		case NOTIFICATION_PROCESS: {
+			// Tick reload-diff watches first so the popup can fire as soon as
+			// the deadline passes, even if no new debugger messages arrive.
+			_whenline_diff_check_deadlines();
+
 			if (is_session_active()) {
 				peer->poll();
 
@@ -2223,6 +2329,12 @@ void ScriptEditorDebugger::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("errors_cleared"));
 	ADD_SIGNAL(MethodInfo("embed_shortcut_requested", PropertyInfo(Variant::INT, "embed_shortcut_action")));
 	ADD_SIGNAL(MethodInfo("whenline_data_updated"));
+	// Emitted ~10 s after a `gdscript:whenline_diff` if any of the changed
+	// lines never executed. Carries the script path and a sorted
+	// `PackedInt32Array` of lines that haven't been seen running.
+	ADD_SIGNAL(MethodInfo("whenline_changes_unexecuted",
+			PropertyInfo(Variant::STRING, "script_path"),
+			PropertyInfo(Variant::PACKED_INT32_ARRAY, "unhit_lines")));
 }
 
 void ScriptEditorDebugger::add_debugger_tab(Control *p_control) {

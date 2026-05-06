@@ -39,6 +39,8 @@
 #include "gdscript_rpc_callable.h"
 #include "gdscript_tokenizer_buffer.h"
 #include "gdscript_warning.h"
+#include "whenline/gdscript_diff_node.h"
+#include "whenline/truediff.h"
 
 #ifdef TOOLS_ENABLED
 #include "editor/gdscript_docgen.h"
@@ -903,8 +905,137 @@ Error GDScript::reload(bool p_keep_state) {
 	}
 #endif
 
+#ifdef DEBUG_ENABLED
+	// Diff the freshly compiled AST against the previously cached source
+	// (if any), and tell the editor which lines were touched. This must run
+	// before we overwrite `_whenline_previous_source` below.
+	_whenline_emit_reload_diff(parser);
+
+	// Cache the source we just compiled so the *next* reload can diff
+	// against it. We only cache successful compiles, and we only cache the
+	// text source (binary-tokens scripts skip the diff entirely).
+	if (binary_tokens.is_empty()) {
+		_whenline_previous_source = source;
+	}
+#endif
+
 	reloading = false;
 	return OK;
+}
+
+void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
+#ifdef DEBUG_ENABLED
+	// Bail out early on every "there's nothing for the user to see" path.
+	if (!EngineDebugger::is_active()) {
+		return;
+	}
+	if (_whenline_previous_source.is_empty()) {
+		// First successful compile of the session — by design we don't fire
+		// the popup until the user actually edits something during a run.
+		return;
+	}
+	if (p_new_parser.get_tree() == nullptr) {
+		return;
+	}
+
+	const String script_path = get_script_path();
+	if (script_path.is_empty()) {
+		// Built-in / anonymous scripts have no editor-side identity.
+		return;
+	}
+
+	// Re-parse the previously cached source. We deliberately don't run the
+	// analyzer — we only need the AST shape, and skipping analysis keeps
+	// this path cheap and side-effect-free.
+	GDScriptParser old_parser;
+	const Error parse_err = old_parser.parse(_whenline_previous_source, script_path, false);
+	if (parse_err != OK || old_parser.get_tree() == nullptr) {
+		// If the cached source no longer parses (e.g. because of an engine
+		// upgrade or a bug in our caching), there's nothing useful we can
+		// diff against. Skip silently.
+		return;
+	}
+
+	GDScriptDiffNode *old_root = GDScriptDiffNode::from_parser_root(old_parser.get_tree());
+	GDScriptDiffNode *new_root = GDScriptDiffNode::from_parser_root(p_new_parser.get_tree());
+	if (!old_root || !new_root) {
+		if (old_root) {
+			memdelete(old_root);
+		}
+		if (new_root) {
+			memdelete(new_root);
+		}
+		return;
+	}
+	WhenlineDiffNode::compute_hashes(old_root);
+	WhenlineDiffNode::compute_hashes(new_root);
+
+	TrueDiff diff;
+	WhenlineEditScript script = diff.detect_edits(old_root, new_root);
+
+	// Collect every parser line touched by the diff into a sorted, unique
+	// list. We send line numbers (not nodes) because the editor only cares
+	// about gutter positions and the popup's reachability check.
+	HashSet<int> changed_lines_set;
+	auto add_node_lines = [&](WhenlineDiffNode *p_node) {
+		if (!p_node) {
+			return;
+		}
+		const GDScriptDiffNode *gd = static_cast<const GDScriptDiffNode *>(p_node);
+		const int start = gd->get_start_line();
+		const int end = MAX(gd->get_end_line(), start);
+		for (int l = start; l <= end; l++) {
+			if (l > 0) {
+				changed_lines_set.insert(l);
+			}
+		}
+	};
+	for (const WhenlineDiffNode::Op &op : script.neg_ops) {
+		if (op.kind == WhenlineDiffNode::OP_DETACH || op.kind == WhenlineDiffNode::OP_REMOVE) {
+			add_node_lines(op.node);
+		}
+	}
+	for (const WhenlineDiffNode::Op &op : script.pos_ops) {
+		if (op.kind == WhenlineDiffNode::OP_ATTACH || op.kind == WhenlineDiffNode::OP_UPDATE) {
+			add_node_lines(op.node);
+		}
+	}
+
+	// Free the diff-side trees and any clones the algorithm synthesised.
+	diff.free_owned_clones();
+	memdelete(old_root);
+	memdelete(new_root);
+
+	if (changed_lines_set.is_empty()) {
+		// The user re-saved an unchanged file (whitespace-only edits also
+		// don't reach this branch because `set_source_code` short-circuits
+		// equal source). Nothing to report.
+		return;
+	}
+
+	Vector<int> changed_lines;
+	changed_lines.resize(changed_lines_set.size());
+	{
+		int *w = changed_lines.ptrw();
+		int i = 0;
+		for (int l : changed_lines_set) {
+			w[i++] = l;
+		}
+	}
+	changed_lines.sort();
+
+	// Wire format: [script_path, num_lines, line, line, ...]. Flat layout so
+	// we can extend later (e.g. per-line op kind) without breaking parsers.
+	Array payload;
+	payload.push_back(script_path);
+	payload.push_back(changed_lines.size());
+	for (int l : changed_lines) {
+		payload.push_back(l);
+	}
+	EngineDebugger::get_singleton()->send_message("gdscript:whenline_diff", payload);
+#else
+	(void)p_new_parser;
+#endif
 }
 
 ScriptLanguage *GDScript::get_language() const {

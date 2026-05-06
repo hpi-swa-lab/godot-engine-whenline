@@ -40,6 +40,8 @@
 #include "core/object/script_language.h"
 #include "core/templates/rb_set.h"
 
+class GDScriptParser;
+
 class GDScriptNativeClass : public RefCounted {
 	GDCLASS(GDScriptNativeClass, RefCounted);
 
@@ -179,6 +181,12 @@ private:
 	bool clearing = false;
 	//exported members
 	String source;
+	// Previous successfully compiled source. Captured at the end of
+	// `reload()` so that the *next* reload can run a TrueDiff against it and
+	// emit a `gdscript:whenline_diff` message describing what the user just
+	// changed. Empty until the first successful compile, which is also why
+	// the very first compile of a session never produces a diff message.
+	String _whenline_previous_source;
 	Vector<uint8_t> binary_tokens;
 	String path;
 	bool path_valid = false; // False if using default path.
@@ -210,6 +218,14 @@ private:
 	bool _update_exports(bool *r_err = nullptr, bool p_recursive_call = false, PlaceHolderScriptInstance *p_instance_to_update = nullptr, bool p_base_exports_changed = false);
 
 	void _save_orphaned_subclasses();
+
+	// If a previous source is cached and the debugger is active, parse both
+	// the previous and the freshly compiled source as ASTs, run TrueDiff over
+	// them and send a `gdscript:whenline_diff` message describing which
+	// editor lines were touched. Always safe to call: it bails out silently
+	// when the debugger is inactive, when there's no previous source, or
+	// when re-parsing the old source fails.
+	void _whenline_emit_reload_diff(const GDScriptParser &p_new_parser);
 
 	void _get_script_property_list(List<PropertyInfo> *r_list, bool p_include_base) const;
 	void _get_script_method_list(List<MethodInfo> *r_list, bool p_include_base) const;

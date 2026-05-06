@@ -278,6 +278,41 @@ void ScriptEditor::_update_whenline_gutters(int p_debugger) {
 	}
 }
 
+void ScriptEditor::_whenline_changes_unexecuted(const String &p_script_path, const PackedInt32Array &p_unhit_lines, int p_debugger) {
+	// We don't gate this on which debugger session emitted the signal: the
+	// user only really cares that *some* hot-reloaded edit didn't execute.
+	(void)p_debugger;
+
+	if (p_unhit_lines.is_empty()) {
+		return;
+	}
+
+	// Build a short, human-readable list of the unhit lines. We cap the
+	// count we display so the dialog doesn't blow up on large diffs; the
+	// gutter highlighting will eventually carry the full set.
+	constexpr int MAX_LINES_DISPLAYED = 8;
+	String lines_text;
+	const int displayed = MIN((int)p_unhit_lines.size(), MAX_LINES_DISPLAYED);
+	for (int i = 0; i < displayed; i++) {
+		if (i > 0) {
+			lines_text += ", ";
+		}
+		lines_text += itos(p_unhit_lines[i]);
+	}
+	if (p_unhit_lines.size() > displayed) {
+		lines_text += vformat(" (+%d more)", p_unhit_lines.size() - displayed);
+	}
+
+	const String message = vformat(
+			TTR("Your edits to %s on line(s) %s haven't run yet during this debugging session.\n\nMake sure the code path containing your changes is reachable in the running game."),
+			p_script_path,
+			lines_text);
+
+	error_dialog->set_title(TTR("Edited code didn't execute"));
+	error_dialog->set_text(message);
+	error_dialog->popup_centered();
+}
+
 void ScriptEditor::_set_breakpoint(Ref<RefCounted> p_script, int p_line, bool p_enabled) {
 	Ref<Script> scr = Object::cast_to<Script>(*p_script);
 	if (scr.is_valid() && (scr->has_source_code() || scr->get_path().is_resource_file())) {
@@ -4056,6 +4091,7 @@ ScriptEditor::ScriptEditor(WindowWrapper *p_wrapper) {
 	debugger->connect("breakpoint_set_in_tree", callable_mp(this, &ScriptEditor::_set_breakpoint));
 	debugger->connect("breakpoints_cleared_in_tree", callable_mp(this, &ScriptEditor::_clear_breakpoints));
 	debugger->connect("whenline_data_updated", callable_mp(this, &ScriptEditor::_update_whenline_gutters));
+	debugger->connect("whenline_changes_unexecuted", callable_mp(this, &ScriptEditor::_whenline_changes_unexecuted));
 
 	script_name_button_hbox = memnew(HBoxContainer);
 	script_name_button_hbox->set_h_size_flags(SIZE_EXPAND_FILL);
