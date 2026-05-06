@@ -76,6 +76,11 @@ public:
 		// For OP_ATTACH: where the node should be attached.
 		// For OP_DETACH: the node's old parent (recorded when the op is created).
 		WhenlineDiffNode *parent = nullptr;
+		// For OP_UPDATE: the matching node in the *new* tree. `node` is
+		// always the old-tree node (so its identity is stable across the
+		// edit), while `paired_node` carries the new-tree position. Null for
+		// every other op kind.
+		WhenlineDiffNode *paired_node = nullptr;
 		int index = -1;
 		// For OP_UPDATE: the new and old text of the leaf node.
 		String new_text;
@@ -158,6 +163,22 @@ public:
 	// algorithm's apply order.
 	LocalVector<WhenlineDiffNode::Op> neg_ops;
 	LocalVector<WhenlineDiffNode::Op> pos_ops;
+
+	// Every (old_node, new_node) pair that the diff considered "matched":
+	// either by literal-equal subtrees, structural assignment, or recursive
+	// pairing during edit-script construction. Consumers use this to derive
+	// `old_line → new_line` mappings for out-of-band per-line state (e.g.
+	// execution counters that should follow code as it shifts in the file).
+	//
+	// The list is in roughly DFS pre-order, so when multiple matches cover
+	// the same source line the more specific (deeper) entry comes later —
+	// useful for "deepest wins" line-map construction.
+	struct Match {
+		WhenlineDiffNode *old_node = nullptr;
+		WhenlineDiffNode *new_node = nullptr;
+		bool literal = false; // True if the subtrees are textually identical.
+	};
+	LocalVector<Match> matches;
 
 	bool is_empty() const { return neg_ops.is_empty() && pos_ops.is_empty(); }
 	int size() const { return int(neg_ops.size() + pos_ops.size()); }

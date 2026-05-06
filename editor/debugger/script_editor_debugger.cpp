@@ -1041,8 +1041,13 @@ void ScriptEditorDebugger::_msg_whenline_data(uint64_t p_thread_id, const Array 
 }
 
 void ScriptEditorDebugger::_msg_whenline_diff(uint64_t p_thread_id, const Array &p_data) {
-	// Wire format: [script_path, num_lines, line, line, ...]. See
-	// `GDScript::_whenline_emit_reload_diff` for the producer side.
+	// Wire format:
+	//   [script_path,
+	//    num_changed,    <int>
+	//    changed lines (num_changed of them),
+	//    num_mappings,   <int>
+	//    (old_line, new_line) pairs (2 * num_mappings ints)]
+	// See `GDScript::_whenline_emit_reload_diff` for the producer side.
 	ERR_FAIL_COND(p_data.size() < 2);
 	ERR_FAIL_COND(p_data[0].get_type() != Variant::STRING);
 	ERR_FAIL_COND(p_data[1].get_type() != Variant::INT);
@@ -1050,7 +1055,7 @@ void ScriptEditorDebugger::_msg_whenline_diff(uint64_t p_thread_id, const Array 
 	const String script_path = p_data[0];
 	const int num_lines = (int)(int64_t)p_data[1];
 	ERR_FAIL_COND(num_lines < 0);
-	ERR_FAIL_COND(p_data.size() < 2 + num_lines);
+	ERR_FAIL_COND(p_data.size() < 2 + num_lines + 1);
 
 	WhenlineDiffWatch watch;
 	watch.deadline_msec = OS::get_singleton()->get_ticks_msec() + WHENLINE_DIFF_WAIT_MSEC;
@@ -1062,10 +1067,74 @@ void ScriptEditorDebugger::_msg_whenline_diff(uint64_t p_thread_id, const Array 
 		watch.all_changed_lines.insert(line);
 	}
 
+	const int mapping_section_start = 2 + num_lines;
+	ERR_FAIL_COND(p_data[mapping_section_start].get_type() != Variant::INT);
+	const int num_mappings = (int)(int64_t)p_data[mapping_section_start];
+	ERR_FAIL_COND(num_mappings < 0);
+	ERR_FAIL_COND(p_data.size() < mapping_section_start + 1 + 2 * num_mappings);
+
+	HashMap<int, int> line_map;
+	for (int i = 0; i < num_mappings; i++) {
+		const int idx = mapping_section_start + 1 + 2 * i;
+		ERR_FAIL_COND(p_data[idx].get_type() != Variant::INT);
+		ERR_FAIL_COND(p_data[idx + 1].get_type() != Variant::INT);
+		const int old_line = (int)(int64_t)p_data[idx];
+		const int new_line = (int)(int64_t)p_data[idx + 1];
+		line_map[old_line] = new_line;
+	}
+
+	// Remap historical whenline data so unchanged code keeps its execution
+	// counters even when its line number shifted. Lines not in the mapping
+	// either describe rewritten code (in `expected_lines`) or deleted code,
+	// so their counters are dropped.
+	_whenline_remap_script_data(script_path, line_map);
+
 	// Replace any prior watch for this script: a fresh diff means the user
 	// just edited the file again, and we should restart the timer with the
 	// most recent set of changes.
 	whenline_diff_watches[script_path] = watch;
+
+	// The remap likely invalidated whatever the gutter was showing for this
+	// script. Tell listeners so they re-fetch.
+	emit_signal(SNAME("whenline_data_updated"));
+}
+
+void ScriptEditorDebugger::_whenline_remap_script_data(const String &p_script_path, const HashMap<int, int> &p_line_map) {
+	// Rebuild each per-line table by translating its keys through the
+	// mapping. Anything whose key isn't in the mapping is dropped — those
+	// entries describe code the user just rewrote or deleted, so their
+	// counters no longer apply. We accumulate into a fresh `HashMap` rather
+	// than mutating in place so we don't have to reason about iterator
+	// stability or about old/new lines colliding on the same key.
+	{
+		HashMap<String, HashMap<int, WhenlineEditorEntry>>::Iterator script_it = whenline_data.find(p_script_path);
+		if (script_it != whenline_data.end()) {
+			HashMap<int, WhenlineEditorEntry> remapped;
+			for (const KeyValue<int, WhenlineEditorEntry> &kv : script_it->value) {
+				HashMap<int, int>::ConstIterator m = p_line_map.find(kv.key);
+				if (m == p_line_map.end()) {
+					continue;
+				}
+				remapped[m->value] = kv.value;
+			}
+			script_it->value = remapped;
+		}
+	}
+
+	{
+		HashMap<String, HashMap<int, WhenlineInfluenceLineData>>::Iterator script_it = whenline_influence.find(p_script_path);
+		if (script_it != whenline_influence.end()) {
+			HashMap<int, WhenlineInfluenceLineData> remapped;
+			for (const KeyValue<int, WhenlineInfluenceLineData> &kv : script_it->value) {
+				HashMap<int, int>::ConstIterator m = p_line_map.find(kv.key);
+				if (m == p_line_map.end()) {
+					continue;
+				}
+				remapped[m->value] = kv.value;
+			}
+			script_it->value = remapped;
+		}
+	}
 }
 
 void ScriptEditorDebugger::_whenline_diff_observe_line_hit(const String &p_script_path, int p_line) {

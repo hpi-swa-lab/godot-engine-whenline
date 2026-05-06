@@ -944,6 +944,17 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 		return;
 	}
 
+	// Flush any pending whenline state *before* sending the diff. Otherwise
+	// in-flight samples (taken just before the reload but not yet sent)
+	// would arrive at the editor *after* it has remapped its tables, and
+	// would re-introduce stale entries on the old line numbers we just
+	// removed.
+	GDScriptLanguage *lang = GDScriptLanguage::get_singleton();
+	if (lang) {
+		lang->_whenline_flush();
+		lang->_whenline_flush_influence();
+	}
+
 	// Re-parse the previously cached source. We deliberately don't run the
 	// analyzer — we only need the AST shape, and skipping analysis keeps
 	// this path cheap and side-effect-free.
@@ -973,9 +984,11 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 	TrueDiff diff;
 	WhenlineEditScript script = diff.detect_edits(old_root, new_root);
 
-	// Collect every parser line touched by the diff into a sorted, unique
-	// list. We send line numbers (not nodes) because the editor only cares
-	// about gutter positions and the popup's reachability check.
+	// Collect changed lines using *new-side* line numbers only. The popup
+	// asks the editor to wait for these to execute, so they need to be
+	// addresses that exist in the file the user is now looking at. Old-side
+	// detach/remove ops describe code that no longer exists; their lines
+	// would never run by definition.
 	HashSet<int> changed_lines_set;
 	auto add_node_lines = [&](WhenlineDiffNode *p_node) {
 		if (!p_node) {
@@ -990,14 +1003,59 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 			}
 		}
 	};
-	for (const WhenlineDiffNode::Op &op : script.neg_ops) {
-		if (op.kind == WhenlineDiffNode::OP_DETACH || op.kind == WhenlineDiffNode::OP_REMOVE) {
+	for (const WhenlineDiffNode::Op &op : script.pos_ops) {
+		if (op.kind == WhenlineDiffNode::OP_ATTACH) {
+			// `op.node` is a clone tied to the new-tree position by
+			// `load_unassigned`, which copies the source line numbers across.
 			add_node_lines(op.node);
+		} else if (op.kind == WhenlineDiffNode::OP_UPDATE) {
+			// For updates, prefer the new-tree counterpart — the user's
+			// edit lives at the new file's line, not the old one's.
+			add_node_lines(op.paired_node ? op.paired_node : op.node);
 		}
 	}
-	for (const WhenlineDiffNode::Op &op : script.pos_ops) {
-		if (op.kind == WhenlineDiffNode::OP_ATTACH || op.kind == WhenlineDiffNode::OP_UPDATE) {
-			add_node_lines(op.node);
+
+	// Build an old_line → new_line mapping from the matched node pairs.
+	// Most parser nodes share lines with their parents and siblings, so for
+	// any given old line we want the *innermost* (smallest-subtree) match
+	// that covers it. The matches list is in DFS pre-order, so we just walk
+	// it and let later (deeper) entries overwrite earlier ones — except we
+	// skip pairs that span unequal numbers of lines, since a multi-line
+	// match isn't a reliable per-line shift on its own.
+	HashMap<int, int> line_map;
+	for (const WhenlineEditScript::Match &m : script.matches) {
+		if (!m.old_node || !m.new_node) {
+			continue;
+		}
+		const GDScriptDiffNode *old_n = static_cast<const GDScriptDiffNode *>(m.old_node);
+		const GDScriptDiffNode *new_n = static_cast<const GDScriptDiffNode *>(m.new_node);
+		const int old_start = old_n->get_start_line();
+		const int new_start = new_n->get_start_line();
+		const int old_end = MAX(old_n->get_end_line(), old_start);
+		const int new_end = MAX(new_n->get_end_line(), new_start);
+		if (old_start <= 0 || new_start <= 0) {
+			continue; // Synthetic nodes (no real source position).
+		}
+		const int old_span = old_end - old_start;
+		const int new_span = new_end - new_start;
+		if (old_span != new_span) {
+			// The subtree shifted *and* changed shape. Per-line shifts
+			// inside it aren't trustworthy, so contribute nothing.
+			continue;
+		}
+		for (int i = 0; i <= old_span; i++) {
+			line_map[old_start + i] = new_start + i;
+		}
+	}
+
+	// Drop any mapping whose target line is in the changed set: those new
+	// lines contain code the user just rewrote, so the old counters don't
+	// describe them anymore.
+	for (HashMap<int, int>::Iterator it = line_map.begin(); it != line_map.end();) {
+		HashMap<int, int>::Iterator current = it;
+		++it;
+		if (changed_lines_set.has(current->value)) {
+			line_map.remove(current);
 		}
 	}
 
@@ -1006,7 +1064,7 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 	memdelete(old_root);
 	memdelete(new_root);
 
-	if (changed_lines_set.is_empty()) {
+	if (changed_lines_set.is_empty() && line_map.is_empty()) {
 		// The user re-saved an unchanged file (whitespace-only edits also
 		// don't reach this branch because `set_source_code` short-circuits
 		// equal source). Nothing to report.
@@ -1024,13 +1082,36 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 	}
 	changed_lines.sort();
 
-	// Wire format: [script_path, num_lines, line, line, ...]. Flat layout so
-	// we can extend later (e.g. per-line op kind) without breaking parsers.
+	// Flatten the line map. We sort by old-line so the editor can apply it
+	// in a single pass without surprises, even though the order isn't
+	// strictly required for correctness.
+	Vector<int> map_old_lines;
+	map_old_lines.resize(line_map.size());
+	{
+		int *w = map_old_lines.ptrw();
+		int i = 0;
+		for (const KeyValue<int, int> &kv : line_map) {
+			w[i++] = kv.key;
+		}
+	}
+	map_old_lines.sort();
+
+	// Wire format:
+	//   [script_path,
+	//    num_changed,    <int>
+	//    changed lines (num_changed of them),
+	//    num_mappings,   <int>
+	//    (old_line, new_line) pairs (2 * num_mappings ints)]
 	Array payload;
 	payload.push_back(script_path);
 	payload.push_back(changed_lines.size());
 	for (int l : changed_lines) {
 		payload.push_back(l);
+	}
+	payload.push_back(map_old_lines.size());
+	for (int old_line : map_old_lines) {
+		payload.push_back(old_line);
+		payload.push_back(line_map[old_line]);
 	}
 	EngineDebugger::get_singleton()->send_message("gdscript:whenline_diff", payload);
 #else

@@ -474,11 +474,33 @@ void TrueDiff::select_available_tree(LocalVector<WhenlineDiffNode *> &r_unassign
 
 // ---------- Phase 3: compute edit script ------------------------------------
 
+// Walk a pair of literally-equal subtrees and record every (old, new)
+// descendant pair into the edit script. We do this for the literal-match
+// fast path because `update_literals` is not called there (there's nothing
+// to update), yet we still want consumers to know about the pairing so
+// they can preserve per-line state across hot-reloads.
+static void _record_literal_match_subtree(WhenlineDiffNode *p_a, WhenlineDiffNode *p_b, WhenlineEditScript &r_buf) {
+	WhenlineEditScript::Match match;
+	match.old_node = p_a;
+	match.new_node = p_b;
+	match.literal = true;
+	r_buf.matches.push_back(match);
+	for (uint32_t i = 0; i < p_a->children.size() && i < p_b->children.size(); i++) {
+		_record_literal_match_subtree(p_a->children[i], p_b->children[i], r_buf);
+	}
+}
+
 WhenlineDiffNode *TrueDiff::compute_edit_script(WhenlineDiffNode *a, WhenlineDiffNode *b, WhenlineDiffNode *p_parent, int p_link, WhenlineEditScript &r_buf) {
 	// Case 1: a was assigned to b directly. If they're a literal match the
 	// subtree is unchanged; otherwise update the literal leaves.
 	if (a->assigned && a->assigned == b) {
-		WhenlineDiffNode *new_tree = a->literal_match ? a : update_literals(a, b, r_buf);
+		WhenlineDiffNode *new_tree;
+		if (a->literal_match) {
+			_record_literal_match_subtree(a, b, r_buf);
+			new_tree = a;
+		} else {
+			new_tree = update_literals(a, b, r_buf);
+		}
 		a->assigned = nullptr;
 		return new_tree;
 	}
@@ -614,10 +636,22 @@ void TrueDiff::compute_edit_script_list(LocalVector<WhenlineDiffNode *> &a_list,
 }
 
 WhenlineDiffNode *TrueDiff::update_literals(WhenlineDiffNode *a, WhenlineDiffNode *b, WhenlineEditScript &r_buf) {
+	// Every call to `update_literals` corresponds to a matched node pair: by
+	// the time we get here the algorithm has decided `a` (old) and `b` (new)
+	// are the same subtree, modulo possibly-different text on leaves. Record
+	// the pair so consumers can derive an old-line → new-line mapping for
+	// out-of-band per-line state (e.g. execution counters).
+	WhenlineEditScript::Match match;
+	match.old_node = a;
+	match.new_node = b;
+	match.literal = !(a->is_text() && b->is_text() && a->get_text() != b->get_text());
+	r_buf.matches.push_back(match);
+
 	if (a->is_text() && b->is_text() && a->get_text() != b->get_text()) {
 		WhenlineDiffNode::Op op;
 		op.kind = WhenlineDiffNode::OP_UPDATE;
 		op.node = a;
+		op.paired_node = b;
 		op.new_text = b->get_text();
 		op.old_text = a->get_text();
 		r_buf.pos_ops.push_back(op);

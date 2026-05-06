@@ -342,6 +342,10 @@ private:
 
 	void _whenline_diff_observe_line_hit(const String &p_script_path, int p_line);
 	void _whenline_diff_check_deadlines();
+	// Translate per-line whenline data through the mapping that arrived with
+	// a `gdscript:whenline_diff`. Entries whose key is not in the mapping
+	// are dropped (they describe code the user just rewrote or deleted).
+	void _whenline_remap_script_data(const String &p_script_path, const HashMap<int, int> &p_line_map);
 
 	void _whenline_clear_session_data();
 
