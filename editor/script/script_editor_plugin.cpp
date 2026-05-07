@@ -256,18 +256,36 @@ void ScriptEditor::_update_whenline_gutters(int p_debugger) {
 
 		const Dictionary line_data = dbg->get_whenline_data_for_script(script_path);
 
+		// Lines that the most recent reload-diff flagged as changed but that
+		// haven't been observed running yet. We turn this into a `HashSet`
+		// for O(1) lookup inside the per-line loop.
+		const PackedInt32Array changed_unhit_lines = dbg->get_whenline_changed_unhit_lines_for_script(script_path);
+		HashSet<int> changed_unhit_set;
+		for (int ci = 0; ci < changed_unhit_lines.size(); ci++) {
+			changed_unhit_set.insert(changed_unhit_lines[ci]);
+		}
+
 		const int line_count = code_edit->get_line_count();
 		for (int ln = 0; ln < line_count; ln++) {
 			// we start at line 1 (code_edit starts at line 0)
 			const int key = ln + 1;
+			Dictionary meta;
+			bool has_anything = false;
 			if (line_data.has(key)) {
-				Dictionary meta = line_data[key];
+				meta = line_data[key];
+				has_anything = true;
 				// Merge per-variable data-flow influence into the same Dictionary
 				// so the gutter draw callback and tooltip can access everything in one place.
 				Dictionary influence = dbg->get_whenline_influence_for_line(script_path, key);
 				if (!influence.is_empty()) {
 					meta["influence"] = influence;
 				}
+			}
+			if (changed_unhit_set.has(key)) {
+				meta["changed_unhit"] = true;
+				has_anything = true;
+			}
+			if (has_anything) {
 				code_edit->set_line_gutter_metadata(ln, code_edit->get_whenline_gutter_index(), meta);
 			} else {
 				// clear stuff from last run

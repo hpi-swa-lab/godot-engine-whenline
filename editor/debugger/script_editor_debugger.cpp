@@ -1230,6 +1230,28 @@ Dictionary ScriptEditorDebugger::get_whenline_data_for_script(const String &p_sc
 	return result;
 }
 
+PackedInt32Array ScriptEditorDebugger::get_whenline_changed_unhit_lines_for_script(const String &p_script_path) const {
+	PackedInt32Array result;
+	const HashMap<String, WhenlineDiffWatch>::ConstIterator script_it = whenline_diff_watches.find(p_script_path);
+	if (script_it == whenline_diff_watches.end()) {
+		return result;
+	}
+	const WhenlineDiffWatch &watch = script_it->value;
+	if (watch.expected_lines.is_empty()) {
+		return result;
+	}
+	result.resize(watch.expected_lines.size());
+	{
+		int32_t *w = result.ptrw();
+		int i = 0;
+		for (int l : watch.expected_lines) {
+			w[i++] = l;
+		}
+	}
+	result.sort();
+	return result;
+}
+
 void ScriptEditorDebugger::_msg_whenline_influence(uint64_t p_thread_id, const Array &p_data) {
 	int i = 0;
 	bool changed = false;

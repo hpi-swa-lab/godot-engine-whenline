@@ -2037,73 +2037,87 @@ void CodeEdit::_whenline_gutter_draw_callback(int p_line, int p_gutter, Rect2 p_
 	const Dictionary d = meta;
 
 	const int64_t count = d.get("count", 0);
-	if (count <= 0) {
-		return;
-	}
-
-	static const String reason_count_keys[] = { "", "count_init", "count_process", "count_input", "count_other" };
-	int biggest_reason = 0;
-	int64_t biggest_count = 0;
-	int reason_count = 0;
-	for (int i = 1; i <= 4; i++) {
-		const int64_t current_count = (int64_t)d.get(reason_count_keys[i], (int64_t) 0);
-		if (current_count > 0) {
-			reason_count++;
-			if (current_count > biggest_count) {
-				biggest_count = current_count;
-				biggest_reason = i;
-			}
-		}
-	}
-
-	Ref<Texture2D> icon;
-	switch (biggest_reason) {
-		case 1: // WHENLINE_REASON_INIT
-			icon = theme_cache.whenline_icon_init;
-			break;
-		case 2: // WHENLINE_REASON_PROCESS
-			icon = theme_cache.whenline_icon_process;
-			break;
-		case 3: // WHENLINE_REASON_INPUT
-			icon = theme_cache.whenline_icon_input;
-			break;
-		case 4: // WHENLINE_REASON_OTHER
-			icon = theme_cache.whenline_icon_other;
-			break;
-		default:
-			// TODO question mark icon?
-			break;
-	}
-
-	if (icon.is_null()) {
+	const bool changed_unhit = d.get("changed_unhit", false);
+	if (count <= 0 && !changed_unhit) {
 		return;
 	}
 
 	RID ci = get_text_canvas_item();
-	Color base_color = Color(0.512, 0.836, 0.288, 1.0);
-
-	const float log_intensity = CLAMP(
-			(float)Math::log((double)(count + 1)) / (float)Math::log(64.0),
-			0.0f, 1.0f);
-	const float alpha = Math::lerp(0.35f, 0.90f, log_intensity);
-
-	base_color.a = alpha;
-
-	int horizontal_padding = p_region.size.x / 10;
-	int vertical_padding = p_region.size.y / 6;
-
+	const int horizontal_padding = p_region.size.x / 10;
+	const int vertical_padding = p_region.size.y / 6;
 	Rect2 icon_region = p_region;
 	icon_region.position += Point2(horizontal_padding, vertical_padding);
 	icon_region.size -= Point2(horizontal_padding, vertical_padding) * 2;
 
-	icon->draw_rect(ci, icon_region, false, base_color);
+	if (count > 0) {
+		static const String reason_count_keys[] = { "", "count_init", "count_process", "count_input", "count_other" };
+		int biggest_reason = 0;
+		int64_t biggest_count = 0;
+		int reason_count = 0;
+		for (int i = 1; i <= 4; i++) {
+			const int64_t current_count = (int64_t)d.get(reason_count_keys[i], (int64_t)0);
+			if (current_count > 0) {
+				reason_count++;
+				if (current_count > biggest_count) {
+					biggest_count = current_count;
+					biggest_reason = i;
+				}
+			}
+		}
 
-	if (reason_count > 1) {
-		const float dot_size = MAX(2.0f, icon_region.size.x * 0.3f);
-		Rect2 dot_rect;
-		dot_rect.size = Size2(dot_size, dot_size);
-		dot_rect.position = icon_region.get_end() - dot_rect.size;
-		RenderingServer::get_singleton()->canvas_item_add_rect(ci, dot_rect, Color(1.0f, 1.0f, 1.0f, 0.8f));
+		Ref<Texture2D> icon;
+		switch (biggest_reason) {
+			case 1: // WHENLINE_REASON_INIT
+				icon = theme_cache.whenline_icon_init;
+				break;
+			case 2: // WHENLINE_REASON_PROCESS
+				icon = theme_cache.whenline_icon_process;
+				break;
+			case 3: // WHENLINE_REASON_INPUT
+				icon = theme_cache.whenline_icon_input;
+				break;
+			case 4: // WHENLINE_REASON_OTHER
+				icon = theme_cache.whenline_icon_other;
+				break;
+			default:
+				// TODO question mark icon?
+				break;
+		}
+
+		if (icon.is_valid()) {
+			Color base_color = Color(0.512, 0.836, 0.288, 1.0);
+			const float log_intensity = CLAMP(
+					(float)Math::log((double)(count + 1)) / (float)Math::log(64.0),
+					0.0f, 1.0f);
+			const float alpha = Math::lerp(0.35f, 0.90f, log_intensity);
+			base_color.a = alpha;
+
+			icon->draw_rect(ci, icon_region, false, base_color);
+
+			if (reason_count > 1) {
+				const float dot_size = MAX(2.0f, icon_region.size.x * 0.3f);
+				Rect2 dot_rect;
+				dot_rect.size = Size2(dot_size, dot_size);
+				dot_rect.position = icon_region.get_end() - dot_rect.size;
+				RenderingServer::get_singleton()->canvas_item_add_rect(ci, dot_rect, Color(1.0f, 1.0f, 1.0f, 0.8f));
+			}
+		}
+	}
+
+	if (changed_unhit) {
+		// Draw a hollow amber square around the gutter cell to mark a line
+		// the user just edited that hasn't run yet during this debugging
+		// session. Distinct from the executed-icon style (filled icon) so
+		// the two states stay readable together when both happen on the
+		// same line (e.g. after a future reload that re-touches a line
+		// whose old data was preserved through line-mapping).
+		const Color border_color = Color(1.0f, 0.72f, 0.15f, 0.9f);
+		const float border_thickness = MAX(1.0f, icon_region.size.x * 0.08f);
+		RenderingServer *rs = RenderingServer::get_singleton();
+		rs->canvas_item_add_rect(ci, Rect2(icon_region.position, Size2(icon_region.size.x, border_thickness)), border_color);
+		rs->canvas_item_add_rect(ci, Rect2(Point2(icon_region.position.x, icon_region.get_end().y - border_thickness), Size2(icon_region.size.x, border_thickness)), border_color);
+		rs->canvas_item_add_rect(ci, Rect2(icon_region.position, Size2(border_thickness, icon_region.size.y)), border_color);
+		rs->canvas_item_add_rect(ci, Rect2(Point2(icon_region.get_end().x - border_thickness, icon_region.position.y), Size2(border_thickness, icon_region.size.y)), border_color);
 	}
 }
 
@@ -2123,11 +2137,11 @@ String CodeEdit::get_tooltip(const Point2 &p_pos) const {
 	}
 
 	const Dictionary d = meta;
-	const int64_t count = d.get("count", (int64_t) 0);
-	if (count <= 0) {
+	const int64_t count = d.get("count", (int64_t)0);
+	const bool changed_unhit = d.get("changed_unhit", false);
+	if (count <= 0 && !changed_unhit) {
 		return TextEdit::get_tooltip(p_pos);
 	}
-
 
 	struct ReasonEntry {
 		String count_key;
@@ -2154,11 +2168,21 @@ String CodeEdit::get_tooltip(const Point2 &p_pos) const {
 		}
 	}
 
-	const String count_line = "Executed " + String::num_int64(count) + " times";
-
-	String tooltip = count_line;
-	if (reason_count > 1) {
-		tooltip += "\n" + TTR("Triggered from:") + "\n" + reasons;
+	String tooltip;
+	if (changed_unhit) {
+		// Lead with the "recently changed and not yet run" notice; the
+		// historical execution data (if any) is then appended underneath
+		// so the user can compare past behaviour with current expectation.
+		tooltip = TTR("You edited this line, but it hasn't run yet during this debugging session.");
+	}
+	if (count > 0) {
+		if (!tooltip.is_empty()) {
+			tooltip += "\n\n";
+		}
+		tooltip += "Executed " + String::num_int64(count) + " times";
+		if (reason_count > 1) {
+			tooltip += "\n" + TTR("Triggered from:") + "\n" + reasons;
+		}
 	}
 
 	// Data-flow influence: per-variable breakdown.

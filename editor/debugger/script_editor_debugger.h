@@ -451,6 +451,11 @@ public:
 
 	Dictionary get_whenline_data_for_script(const String &p_script_path) const;
 	Dictionary get_whenline_influence_for_line(const String &p_script_path, int p_line) const;
+	// Lines from the most recent reload-diff that haven't been observed
+	// running yet. Cleared as soon as the deadline passes (popup fires) or
+	// every line was hit in time. Sorted ascending; empty when no watch is
+	// pending for the given script.
+	PackedInt32Array get_whenline_changed_unhit_lines_for_script(const String &p_script_path) const;
 	void toggle_profiler(const String &p_profiler, bool p_enable, const Array &p_data);
 
 	ScriptEditorDebugger();
