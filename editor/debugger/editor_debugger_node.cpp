@@ -135,6 +135,7 @@ ScriptEditorDebugger *EditorDebuggerNode::_add_debugger() {
 	node->connect("clear_breakpoints", callable_mp(this, &EditorDebuggerNode::_breakpoints_cleared_in_tree).bind(id));
 	node->connect("errors_cleared", callable_mp(this, &EditorDebuggerNode::_update_errors));
 	node->connect("whenline_data_updated", callable_mp(this, &EditorDebuggerNode::_whenline_data_updated).bind(id));
+	node->connect("whenline_reload_diff_received", callable_mp(this, &EditorDebuggerNode::_whenline_reload_diff_received).bind(id));
 	node->connect("whenline_changes_unexecuted", callable_mp(this, &EditorDebuggerNode::_whenline_changes_unexecuted).bind(id));
 
 	if (tabs->get_tab_count() > 0) {
@@ -225,6 +226,10 @@ void EditorDebuggerNode::_whenline_data_updated(int p_debugger) {
 	emit_signal(SNAME("whenline_data_updated"), p_debugger);
 }
 
+void EditorDebuggerNode::_whenline_reload_diff_received(const String &p_script_path, int p_debugger) {
+	emit_signal(SNAME("whenline_reload_diff_received"), p_script_path, p_debugger);
+}
+
 void EditorDebuggerNode::_whenline_changes_unexecuted(const String &p_script_path, const PackedInt32Array &p_unhit_lines, int p_debugger) {
 	emit_signal(SNAME("whenline_changes_unexecuted"), p_script_path, p_unhit_lines, p_debugger);
 }
@@ -247,6 +252,9 @@ void EditorDebuggerNode::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("breakpoint_set_in_tree", PropertyInfo("script"), PropertyInfo(Variant::INT, "line"), PropertyInfo(Variant::BOOL, "enabled"), PropertyInfo(Variant::INT, "debugger")));
 	ADD_SIGNAL(MethodInfo("breakpoints_cleared_in_tree", PropertyInfo(Variant::INT, "debugger")));
 	ADD_SIGNAL(MethodInfo("whenline_data_updated", PropertyInfo(Variant::INT, "debugger")));
+	ADD_SIGNAL(MethodInfo("whenline_reload_diff_received",
+			PropertyInfo(Variant::STRING, "script_path"),
+			PropertyInfo(Variant::INT, "debugger")));
 	ADD_SIGNAL(MethodInfo("whenline_changes_unexecuted",
 			PropertyInfo(Variant::STRING, "script_path"),
 			PropertyInfo(Variant::PACKED_INT32_ARRAY, "unhit_lines"),

@@ -1044,7 +1044,8 @@ void ScriptEditorDebugger::_msg_whenline_diff(uint64_t p_thread_id, const Array 
 	// Wire format:
 	//   [script_path,
 	//    num_changed,    <int>
-	//    changed lines (num_changed of them),
+	//    (line, bucket) pairs (2 * num_changed ints; bucket is a
+	//                          GDScriptLanguage::WhenlineReason value),
 	//    num_mappings,   <int>
 	//    (old_line, new_line) pairs (2 * num_mappings ints)]
 	// See `GDScript::_whenline_emit_reload_diff` for the producer side.
@@ -1055,19 +1056,23 @@ void ScriptEditorDebugger::_msg_whenline_diff(uint64_t p_thread_id, const Array 
 	const String script_path = p_data[0];
 	const int num_lines = (int)(int64_t)p_data[1];
 	ERR_FAIL_COND(num_lines < 0);
-	ERR_FAIL_COND(p_data.size() < 2 + num_lines + 1);
+	ERR_FAIL_COND(p_data.size() < 2 + 2 * num_lines + 1);
 
 	WhenlineDiffWatch watch;
 	watch.deadline_msec = OS::get_singleton()->get_ticks_msec() + WHENLINE_DIFF_WAIT_MSEC;
 	watch.reported = false;
 	for (int i = 0; i < num_lines; i++) {
-		ERR_FAIL_COND(p_data[2 + i].get_type() != Variant::INT);
-		const int line = (int)(int64_t)p_data[2 + i];
+		const int line_idx = 2 + 2 * i;
+		ERR_FAIL_COND(p_data[line_idx].get_type() != Variant::INT);
+		ERR_FAIL_COND(p_data[line_idx + 1].get_type() != Variant::INT);
+		const int line = (int)(int64_t)p_data[line_idx];
+		const int bucket = (int)(int64_t)p_data[line_idx + 1];
 		watch.expected_lines.insert(line);
 		watch.all_changed_lines.insert(line);
+		watch.line_buckets[line] = bucket;
 	}
 
-	const int mapping_section_start = 2 + num_lines;
+	const int mapping_section_start = 2 + 2 * num_lines;
 	ERR_FAIL_COND(p_data[mapping_section_start].get_type() != Variant::INT);
 	const int num_mappings = (int)(int64_t)p_data[mapping_section_start];
 	ERR_FAIL_COND(num_mappings < 0);
@@ -1093,6 +1098,12 @@ void ScriptEditorDebugger::_msg_whenline_diff(uint64_t p_thread_id, const Array 
 	// just edited the file again, and we should restart the timer with the
 	// most recent set of changes.
 	whenline_diff_watches[script_path] = watch;
+
+	// Tell the live-changes panel that a brand-new diff just arrived, so it
+	// can spawn a fresh batch row. Distinct from `whenline_data_updated`
+	// (which fires for *any* change, including line-execution samples) so
+	// the panel knows whether to rerender existing rows or add a new one.
+	emit_signal(SNAME("whenline_reload_diff_received"), script_path);
 
 	// The remap likely invalidated whatever the gutter was showing for this
 	// script. Tell listeners so they re-fetch.
@@ -1249,6 +1260,39 @@ PackedInt32Array ScriptEditorDebugger::get_whenline_changed_unhit_lines_for_scri
 		}
 	}
 	result.sort();
+	return result;
+}
+
+Dictionary ScriptEditorDebugger::get_whenline_diff_for_script(const String &p_script_path) const {
+	Dictionary result;
+	const HashMap<String, WhenlineDiffWatch>::ConstIterator script_it = whenline_diff_watches.find(p_script_path);
+	if (script_it == whenline_diff_watches.end()) {
+		return result;
+	}
+	const WhenlineDiffWatch &watch = script_it->value;
+
+	auto sorted_packed = [](const HashSet<int> &p_set) {
+		PackedInt32Array out;
+		out.resize(p_set.size());
+		int32_t *w = out.ptrw();
+		int i = 0;
+		for (int l : p_set) {
+			w[i++] = l;
+		}
+		out.sort();
+		return out;
+	};
+
+	Dictionary line_buckets;
+	for (const KeyValue<int, int> &kv : watch.line_buckets) {
+		line_buckets[kv.key] = kv.value;
+	}
+
+	result["expected_lines"] = sorted_packed(watch.expected_lines);
+	result["all_changed_lines"] = sorted_packed(watch.all_changed_lines);
+	result["line_buckets"] = line_buckets;
+	result["deadline_msec"] = (int64_t)watch.deadline_msec;
+	result["deadline_passed"] = OS::get_singleton()->get_ticks_msec() >= watch.deadline_msec;
 	return result;
 }
 
@@ -2420,6 +2464,10 @@ void ScriptEditorDebugger::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("errors_cleared"));
 	ADD_SIGNAL(MethodInfo("embed_shortcut_requested", PropertyInfo(Variant::INT, "embed_shortcut_action")));
 	ADD_SIGNAL(MethodInfo("whenline_data_updated"));
+	// Emitted once per `gdscript:whenline_diff` arrival. Carries the script
+	// path; the live-changes panel uses this as its "new batch" trigger.
+	ADD_SIGNAL(MethodInfo("whenline_reload_diff_received",
+			PropertyInfo(Variant::STRING, "script_path")));
 	// Emitted ~10 s after a `gdscript:whenline_diff` if any of the changed
 	// lines never executed. Carries the script path and a sorted
 	// `PackedInt32Array` of lines that haven't been seen running.

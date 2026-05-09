@@ -1015,6 +1015,66 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 		}
 	}
 
+	// Build a flat list of every FUNCTION node in the new tree along with
+	// its line range and identifier name. Used below to classify each
+	// changed line by which kind of enclosing method it sits in (init,
+	// process loop, input handler, etc.). We grab this from the new tree
+	// because the changed lines are new-side line numbers.
+	struct FunctionRange {
+		int start_line = 0;
+		int end_line = 0;
+		StringName name;
+	};
+	LocalVector<FunctionRange> function_ranges;
+	{
+		LocalVector<const GDScriptDiffNode *> stack;
+		stack.push_back(new_root);
+		while (!stack.is_empty()) {
+			const GDScriptDiffNode *cur = stack[stack.size() - 1];
+			stack.remove_at(stack.size() - 1);
+			if (cur->get_kind() == GDScriptDiffNode::KIND_STRUCTURAL && cur->get_parser_type() == GDScriptParser::Node::FUNCTION) {
+				FunctionRange range;
+				range.start_line = cur->get_start_line();
+				range.end_line = MAX(cur->get_end_line(), range.start_line);
+				// The visitor places the function identifier as the first
+				// child of the function diff node; see `_visit_function`.
+				if (!cur->children.is_empty()) {
+					const GDScriptDiffNode *first = static_cast<const GDScriptDiffNode *>(cur->children[0]);
+					if (first->get_kind() == GDScriptDiffNode::KIND_IDENTIFIER_TEXT) {
+						range.name = StringName(first->get_text());
+					}
+				}
+				function_ranges.push_back(range);
+			}
+			for (WhenlineDiffNode *child : cur->children) {
+				stack.push_back(static_cast<const GDScriptDiffNode *>(child));
+			}
+		}
+	}
+
+	// Classify a line by walking through the function ranges and picking
+	// the innermost (smallest-span) one that contains it. Lines outside
+	// any function are class-body lines, which run during instance
+	// construction — so they get the INIT bucket.
+	auto classify_line = [&](int p_line) -> GDScriptLanguage::WhenlineReason {
+		const FunctionRange *best = nullptr;
+		int best_span = INT32_MAX;
+		for (const FunctionRange &r : function_ranges) {
+			if (p_line < r.start_line || p_line > r.end_line) {
+				continue;
+			}
+			const int span = r.end_line - r.start_line;
+			if (span < best_span) {
+				best_span = span;
+				best = &r;
+			}
+		}
+		if (!best) {
+			return GDScriptLanguage::WHENLINE_REASON_INIT;
+		}
+		return GDScriptLanguage::_whenline_classify_function_name(best->name);
+	};
+
 	// Build an old_line → new_line mapping from the matched node pairs.
 	// Most parser nodes share lines with their parents and siblings, so for
 	// any given old line we want the *innermost* (smallest-subtree) match
@@ -1099,7 +1159,8 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 	// Wire format:
 	//   [script_path,
 	//    num_changed,    <int>
-	//    changed lines (num_changed of them),
+	//    (line, bucket) pairs (2 * num_changed ints; bucket is a
+	//                          GDScriptLanguage::WhenlineReason value),
 	//    num_mappings,   <int>
 	//    (old_line, new_line) pairs (2 * num_mappings ints)]
 	Array payload;
@@ -1107,6 +1168,7 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 	payload.push_back(changed_lines.size());
 	for (int l : changed_lines) {
 		payload.push_back(l);
+		payload.push_back((int)classify_line(l));
 	}
 	payload.push_back(map_old_lines.size());
 	for (int old_line : map_old_lines) {

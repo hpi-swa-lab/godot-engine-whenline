@@ -146,6 +146,7 @@ protected:
 	void _breakpoint_set_in_tree(Ref<RefCounted> p_script, int p_line, bool p_enabled, int p_debugger);
 	void _breakpoints_cleared_in_tree(int p_debugger);
 	void _whenline_data_updated(int p_debugger);
+	void _whenline_reload_diff_received(const String &p_script_path, int p_debugger);
 	void _whenline_changes_unexecuted(const String &p_script_path, const PackedInt32Array &p_unhit_lines, int p_debugger);
 
 	void _clear_execution(Ref<RefCounted> p_script) {

@@ -56,6 +56,7 @@
 #include "editor/editor_string_names.h"
 #include "editor/file_system/editor_paths.h"
 #include "editor/gui/code_editor.h"
+#include "editor/gui/editor_bottom_panel.h"
 #include "editor/gui/editor_file_dialog.h"
 #include "editor/gui/editor_toaster.h"
 #include "editor/gui/filter_line_edit.h"
@@ -67,6 +68,7 @@
 #include "editor/script/script_text_editor.h"
 #include "editor/script/syntax_highlighters.h"
 #include "editor/script/text_editor.h"
+#include "editor/script/whenline_live_changes_panel.h"
 #include "editor/settings/editor_command_palette.h"
 #include "editor/settings/editor_settings.h"
 #include "editor/shader/shader_editor_plugin.h"
@@ -296,40 +298,10 @@ void ScriptEditor::_update_whenline_gutters(int p_debugger) {
 	}
 }
 
-void ScriptEditor::_whenline_changes_unexecuted(const String &p_script_path, const PackedInt32Array &p_unhit_lines, int p_debugger) {
-	// We don't gate this on which debugger session emitted the signal: the
-	// user only really cares that *some* hot-reloaded edit didn't execute.
-	(void)p_debugger;
-
-	if (p_unhit_lines.is_empty()) {
-		return;
-	}
-
-	// Build a short, human-readable list of the unhit lines. We cap the
-	// count we display so the dialog doesn't blow up on large diffs; the
-	// gutter highlighting will eventually carry the full set.
-	constexpr int MAX_LINES_DISPLAYED = 8;
-	String lines_text;
-	const int displayed = MIN((int)p_unhit_lines.size(), MAX_LINES_DISPLAYED);
-	for (int i = 0; i < displayed; i++) {
-		if (i > 0) {
-			lines_text += ", ";
-		}
-		lines_text += itos(p_unhit_lines[i]);
-	}
-	if (p_unhit_lines.size() > displayed) {
-		lines_text += vformat(" (+%d more)", p_unhit_lines.size() - displayed);
-	}
-
-	const String message = vformat(
-			TTR("Your edits to %s on line(s) %s haven't run yet during this debugging session.\n\nMake sure the code path containing your changes is reachable in the running game."),
-			p_script_path,
-			lines_text);
-
-	error_dialog->set_title(TTR("Edited code didn't execute"));
-	error_dialog->set_text(message);
-	error_dialog->popup_centered();
-}
+// The old `_whenline_changes_unexecuted` modal-popup handler used to live
+// here. It has been superseded by `WhenlineLiveChangesPanel`, which renders
+// the same information non-intrusively in the bottom dock and persists
+// changes across reloads so the user can review them at their own pace.
 
 void ScriptEditor::_set_breakpoint(Ref<RefCounted> p_script, int p_line, bool p_enabled) {
 	Ref<Script> scr = Object::cast_to<Script>(*p_script);
@@ -1615,6 +1587,19 @@ void ScriptEditor::_notification(int p_what) {
 			list_split->connect("dragged", callable_mp(this, &ScriptEditor::_split_dragged));
 
 			EditorFileSystem::get_singleton()->connect("filesystem_changed", callable_mp(this, &ScriptEditor::_filesystem_changed));
+
+			// Register the live-changes bottom panel. Done here (rather than
+			// in the constructor) because the bottom panel only accepts items
+			// once the editor's main UI tree is fully built. The panel itself
+			// owns its content and connects/disconnects to the debugger via
+			// its own NOTIFICATION_ENTER_TREE / EXIT_TREE.
+			if (!whenline_live_changes_panel) {
+				whenline_live_changes_panel = memnew(WhenlineLiveChangesPanel);
+				whenline_live_changes_panel->set_name("LiveChanges");
+				whenline_live_changes_panel_button = EditorNode::get_bottom_panel()->add_item(
+						TTR("Live Changes"),
+						whenline_live_changes_panel);
+			}
 #ifdef ANDROID_ENABLED
 			set_process(true);
 #endif
@@ -4109,7 +4094,6 @@ ScriptEditor::ScriptEditor(WindowWrapper *p_wrapper) {
 	debugger->connect("breakpoint_set_in_tree", callable_mp(this, &ScriptEditor::_set_breakpoint));
 	debugger->connect("breakpoints_cleared_in_tree", callable_mp(this, &ScriptEditor::_clear_breakpoints));
 	debugger->connect("whenline_data_updated", callable_mp(this, &ScriptEditor::_update_whenline_gutters));
-	debugger->connect("whenline_changes_unexecuted", callable_mp(this, &ScriptEditor::_whenline_changes_unexecuted));
 
 	script_name_button_hbox = memnew(HBoxContainer);
 	script_name_button_hbox->set_h_size_flags(SIZE_EXPAND_FILL);

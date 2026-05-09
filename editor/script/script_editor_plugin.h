@@ -52,6 +52,7 @@ class VSplitContainer;
 class WindowWrapper;
 class EditorSyntaxHighlighter;
 class ScriptEditorBase;
+class WhenlineLiveChangesPanel;
 
 class ScriptEditorQuickOpen : public ConfirmationDialog {
 	GDCLASS(ScriptEditorQuickOpen, ConfirmationDialog);
@@ -240,6 +241,11 @@ class ScriptEditor : public PanelContainer {
 	Tree *disk_changed_list = nullptr;
 	ConfirmationDialog *disk_changed = nullptr;
 
+	// Bottom-panel UI that journals reload-diff changes during a debug
+	// session. Owned by `EditorNode::get_bottom_panel()` once registered.
+	WhenlineLiveChangesPanel *whenline_live_changes_panel = nullptr;
+	Button *whenline_live_changes_panel_button = nullptr;
+
 	bool restoring_layout;
 
 	void _resave_scripts(const String &p_str);
@@ -296,10 +302,6 @@ class ScriptEditor : public PanelContainer {
 	void _set_execution(Ref<RefCounted> p_script, int p_line) { _change_execution(p_script, p_line, true); }
 	void _clear_execution(Ref<RefCounted> p_script) { _change_execution(p_script); }
 	void _update_whenline_gutters(int p_debugger);
-	// Triggered when a hot-reload diff's changed lines didn't run within the
-	// debugger's grace period. Pops up a dialog explaining which lines were
-	// missed so the user knows their edit isn't being exercised.
-	void _whenline_changes_unexecuted(const String &p_script_path, const PackedInt32Array &p_unhit_lines, int p_debugger);
 	String _get_debug_tooltip(const String &p_text, Node *p_se);
 	void _script_created(Ref<Script> p_script);
 	void _set_breakpoint(Ref<RefCounted> p_script, int p_line, bool p_enabled);

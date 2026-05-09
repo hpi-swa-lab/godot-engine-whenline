@@ -332,6 +332,13 @@ private:
 	struct WhenlineDiffWatch {
 		HashSet<int> expected_lines; // Shrinks as lines are observed running.
 		HashSet<int> all_changed_lines; // Pristine copy for the popup payload.
+		// Per-line bucket from `_whenline_emit_reload_diff`, classifying
+		// what kind of method the line lives in (init, process loop, input
+		// handler, signal handler, helper). The popup / panel uses this to
+		// pick the right "run anyway" affordance per line. Bucket values
+		// match `WhenlineReason` (1=INIT, 2=PROCESS, 3=INPUT, 4=OTHER) but
+		// stored as int because they crossed a debugger-message boundary.
+		HashMap<int, int> line_buckets;
 		uint64_t deadline_msec = 0;
 		bool reported = false;
 	};
@@ -454,8 +461,17 @@ public:
 	// Lines from the most recent reload-diff that haven't been observed
 	// running yet. Cleared as soon as the deadline passes (popup fires) or
 	// every line was hit in time. Sorted ascending; empty when no watch is
-	// pending for the given script.
+	// pending for the given script. Used by `_update_whenline_gutters`.
 	PackedInt32Array get_whenline_changed_unhit_lines_for_script(const String &p_script_path) const;
+	// Returns the full active reload-diff watch for a script as a
+	// Dictionary, or an empty Dictionary if none is pending. Populated keys:
+	//   "expected_lines":    PackedInt32Array of lines still unhit
+	//   "all_changed_lines": PackedInt32Array of every line the diff flagged
+	//   "line_buckets":      Dictionary<int, int> mapping line →
+	//                        GDScriptLanguage::WhenlineReason
+	//   "deadline_msec":     uint64 ticks at which the watch expires
+	//   "deadline_passed":   bool, true once we passed `deadline_msec`
+	Dictionary get_whenline_diff_for_script(const String &p_script_path) const;
 	void toggle_profiler(const String &p_profiler, bool p_enable, const Array &p_data);
 
 	ScriptEditorDebugger();
