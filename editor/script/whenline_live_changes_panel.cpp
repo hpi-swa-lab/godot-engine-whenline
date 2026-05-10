@@ -40,6 +40,7 @@
 #include "scene/gui/label.h"
 #include "scene/gui/scroll_container.h"
 #include "scene/gui/separator.h"
+#include "scene/main/timer.h"
 
 // Bucket constants mirror `GDScriptLanguage::WhenlineReason`. We don't
 // include the GDScript header here to keep this UI module independent of
@@ -53,15 +54,15 @@ static constexpr int BUCKET_OTHER = 4;
 String WhenlineLiveChangesPanel::_bucket_label(int p_bucket) {
 	switch (p_bucket) {
 		case BUCKET_INIT:
-			return TTR("init");
+			return TTR("Startup");
 		case BUCKET_PROCESS:
-			return TTR("process");
+			return TTR("Per-frame loop");
 		case BUCKET_INPUT:
-			return TTR("input");
+			return TTR("User input");
 		case BUCKET_OTHER:
-			return TTR("helper");
+			return TTR("Helper function");
 		default:
-			return TTR("unknown");
+			return TTR("Unknown");
 	}
 }
 
@@ -93,7 +94,7 @@ String WhenlineLiveChangesPanel::_format_lines(const PackedInt32Array &p_lines) 
 		}
 		i++;
 		if (segments == max_segments) {
-			out += String::utf8(", \xe2\x80\xa6"); // ", …"
+			out += ", ...";
 			break;
 		}
 		if (segments > 0) {
@@ -134,6 +135,18 @@ WhenlineLiveChangesPanel::WhenlineLiveChangesPanel() {
 	empty_label->set_h_size_flags(SIZE_EXPAND_FILL);
 	empty_label->set_modulate(Color(1, 1, 1, 0.5));
 	scroll->add_child(empty_label);
+
+	// Drive deadline transitions even when no debugger samples are flowing.
+	// `whenline_data_updated` only fires when the engine sends fresh data,
+	// so an idle game would otherwise leave a row stuck on PENDING past
+	// its deadline. One tick per second is enough granularity for a 10s
+	// deadline and adds negligible CPU.
+	deadline_tick = memnew(Timer);
+	deadline_tick->set_wait_time(1.0);
+	deadline_tick->set_autostart(true);
+	deadline_tick->set_one_shot(false);
+	deadline_tick->connect("timeout", callable_mp(this, &WhenlineLiveChangesPanel::_refresh_all_rows));
+	add_child(deadline_tick);
 
 	_update_empty_state();
 }
@@ -230,7 +243,15 @@ void WhenlineLiveChangesPanel::_on_reload_diff_received(const String &p_script_p
 
 	Button *batch_close = memnew(Button);
 	batch_close->set_flat(true);
-	batch_close->set_text("\xe2\x9c\x95"); // ✕
+	// Use the editor's "Close" theme icon so we don't depend on a font
+	// having the right Unicode glyph. Falls back to a label if the icon
+	// isn't found, but in the editor it always is.
+	const Ref<Texture2D> close_icon = get_editor_theme_icon(SNAME("Close"));
+	if (close_icon.is_valid()) {
+		batch_close->set_button_icon(close_icon);
+	} else {
+		batch_close->set_text(TTR("Dismiss"));
+	}
 	batch_close->set_tooltip_text(TTR("Dismiss this reload's changes."));
 	batch_close->connect(SceneStringName(pressed), callable_mp(this, &WhenlineLiveChangesPanel::_on_dismiss_batch).bind(batch->id));
 	header->add_child(batch_close);
@@ -296,6 +317,34 @@ WhenlineLiveChangesPanel::RowState *WhenlineLiveChangesPanel::_find_row_by_id(in
 	return nullptr;
 }
 
+ScriptEditorDebugger *WhenlineLiveChangesPanel::_find_debugger_for_script(const String &p_script_path) const {
+	EditorDebuggerNode *node = EditorDebuggerNode::get_singleton();
+	if (!node) {
+		return nullptr;
+	}
+
+	// Prefer a debugger that already has either whenline_data or an active
+	// reload-diff watch for this script. Iterate using `get_debugger(i)`
+	// until it returns null — same loop pattern that `add_debugger_plugin`
+	// uses to walk the tab list.
+	for (int i = 0; ScriptEditorDebugger *dbg = node->get_debugger(i); i++) {
+		if (!dbg->get_whenline_data_for_script(p_script_path).is_empty()) {
+			return dbg;
+		}
+		if (!dbg->get_whenline_diff_for_script(p_script_path).is_empty()) {
+			return dbg;
+		}
+	}
+
+	// No debugger has data for this script yet. Fall back to the current
+	// (or default) one so callers that want to *send* a force-run message
+	// still have a target.
+	if (ScriptEditorDebugger *cur = node->get_current_debugger()) {
+		return cur;
+	}
+	return node->get_default_debugger();
+}
+
 // =============================================================================
 // Batch / row construction
 // =============================================================================
@@ -315,8 +364,20 @@ void WhenlineLiveChangesPanel::_render_batch_from_watch(Batch *p_batch, const Di
 		lines.push_back(line);
 	}
 
-	// One row per bucket. Helper-bucket changes (BUCKET_OTHER) get rendered
-	// the same way; the user just won't get a "Run" button.
+	// Pull the editor theme icons we use across rows once. They're cheap
+	// to fetch but doing it per-row would muddy the loop body.
+	const Ref<Texture2D> dismiss_icon = get_editor_theme_icon(SNAME("Close"));
+	const Ref<Texture2D> run_icon = get_editor_theme_icon(SNAME("Reload"));
+
+	// One row per bucket. Every row gets a hint paragraph; the buckets that
+	// don't support force-run still get the diagnostic so the panel always
+	// answers "what do I do about this?".
+	// Cache the deadline up front so each row inherits it rather than
+	// re-reading the watch every refresh. The watch may be garbage-collected
+	// on the engine side after it expires; we don't want to lose the
+	// MISSED status when that happens.
+	const int64_t watch_deadline = (int64_t)p_watch.get("deadline_msec", (int64_t)0);
+
 	for (KeyValue<int, PackedInt32Array> &kv : grouped) {
 		RowState *row = memnew(RowState);
 		row->id = _next_row_id++;
@@ -326,32 +387,59 @@ void WhenlineLiveChangesPanel::_render_batch_from_watch(Batch *p_batch, const Di
 		row->lines = kv.value;
 		row->lines.sort();
 		row->status = ROW_PENDING;
+		row->deadline_msec = (uint64_t)watch_deadline;
 
-		row->root = memnew(HBoxContainer);
+		// Outer container is vertical so we can stack title and hint text.
+		row->root = memnew(VBoxContainer);
 		row->root->set_h_size_flags(SIZE_EXPAND_FILL);
+		row->root->add_theme_constant_override("separation", int(2 * EDSCALE));
+
+		// Top line: title · status · buttons.
+		HBoxContainer *top = memnew(HBoxContainer);
+		top->set_h_size_flags(SIZE_EXPAND_FILL);
+		row->root->add_child(top);
 
 		row->title_label = memnew(Label);
 		row->title_label->set_h_size_flags(SIZE_EXPAND_FILL);
-		row->root->add_child(row->title_label);
+		row->title_label->set_text_overrun_behavior(TextServer::OVERRUN_TRIM_ELLIPSIS);
+		top->add_child(row->title_label);
 
 		row->status_label = memnew(Label);
 		row->status_label->set_h_size_flags(SIZE_SHRINK_END);
-		row->root->add_child(row->status_label);
+		row->status_label->set_custom_minimum_size(Size2(int(80 * EDSCALE), 0));
+		top->add_child(row->status_label);
 
 		if (_bucket_supports_force_run(row->bucket)) {
 			row->run_button = memnew(Button);
 			row->run_button->set_text(TTR("Run anyway"));
-			row->run_button->set_tooltip_text(TTR("Re-invoke the containing lifecycle method (`_ready`/`_enter_tree` for init, `_process`/`_physics_process` for loop) on every live instance. The call is deferred to the next idle frame so it never interleaves mid-`_process`."));
+			if (run_icon.is_valid()) {
+				row->run_button->set_button_icon(run_icon);
+			}
+			row->run_button->set_tooltip_text(TTR("Re-invoke the containing lifecycle method (_ready / _enter_tree for startup, _process / _physics_process for the per-frame loop) on every live instance. The call is deferred to the next idle frame so it never interleaves mid-_process."));
 			row->run_button->connect(SceneStringName(pressed), callable_mp(this, &WhenlineLiveChangesPanel::_on_run_anyway).bind(p_batch->id, row->id));
-			row->root->add_child(row->run_button);
+			top->add_child(row->run_button);
 		}
 
 		row->dismiss_button = memnew(Button);
 		row->dismiss_button->set_flat(true);
-		row->dismiss_button->set_text("\xe2\x9c\x95"); // ✕
-		row->dismiss_button->set_tooltip_text(TTR("Dismiss this row."));
+		if (dismiss_icon.is_valid()) {
+			row->dismiss_button->set_button_icon(dismiss_icon);
+		} else {
+			row->dismiss_button->set_text(TTR("Dismiss"));
+		}
+		row->dismiss_button->set_tooltip_text(TTR("Dismiss this row. The execution data and changed-line markers stay; only the row in this panel is removed."));
 		row->dismiss_button->connect(SceneStringName(pressed), callable_mp(this, &WhenlineLiveChangesPanel::_on_dismiss_row).bind(p_batch->id, row->id));
-		row->root->add_child(row->dismiss_button);
+		top->add_child(row->dismiss_button);
+
+		// Hint line: explains in plain language *what* the user can do.
+		// Always present, even on rows whose bucket has no force-run path,
+		// so every entry in the panel tells you something actionable.
+		row->hint_label = memnew(Label);
+		row->hint_label->set_h_size_flags(SIZE_EXPAND_FILL);
+		row->hint_label->set_autowrap_mode(TextServer::AUTOWRAP_WORD_SMART);
+		row->hint_label->set_modulate(Color(1, 1, 1, 0.65));
+		row->hint_label->add_theme_constant_override("line_spacing", 0);
+		row->root->add_child(row->hint_label);
 
 		p_batch->rows_box->add_child(row->root);
 		p_batch->rows.push_back(row);
@@ -373,71 +461,51 @@ void WhenlineLiveChangesPanel::_refresh_row(RowState *p_row) {
 		return;
 	}
 
-	// Rebuild the title in case translations/labels changed.
+	// Rebuild the title in case translations/labels changed. We use plain
+	// ASCII separators (" - ") rather than U+00B7 because not every editor
+	// font carries it, and a bullet rendered as a missing-glyph box hurts
+	// readability more than just using a hyphen.
 	const String script_basename = p_row->script_path.is_empty() ? String("<built-in>") : p_row->script_path.get_file();
 	const String lines_text = _format_lines(p_row->lines);
-	p_row->title_label->set_text(vformat("%s · %s · lines %s", script_basename, _bucket_label(p_row->bucket), lines_text));
+	p_row->title_label->set_text(vformat("%s - %s - lines %s", script_basename, _bucket_label(p_row->bucket), lines_text));
+	p_row->title_label->set_tooltip_text(p_row->script_path);
 
-	// For input-bucket rows, surface the most recent input event seen by
-	// each input handler in the script as a tooltip diagnostic. This
-	// gives the user a concrete reproduction step ("press Space to test")
-	// for code paths that depend on a specific input. Empty for buckets
-	// other than INPUT and when no handler has run yet.
-	String tooltip_text = p_row->script_path;
-	if (p_row->bucket == BUCKET_INPUT) {
-		ScriptEditorDebugger *dbg_for_caps = EditorDebuggerNode::get_singleton() ? EditorDebuggerNode::get_singleton()->get_current_debugger() : nullptr;
-		if (dbg_for_caps) {
-			const Dictionary captures = dbg_for_caps->get_whenline_input_captures_for_script(p_row->script_path);
-			if (!captures.is_empty()) {
-				String caps_text;
-				const Array keys = captures.keys();
-				for (int ki = 0; ki < keys.size(); ki++) {
-					const String method = keys[ki];
-					const String description = captures[keys[ki]];
-					if (!caps_text.is_empty()) {
-						caps_text += "\n";
-					}
-					caps_text += vformat("• %s last triggered by: %s", method, description);
-				}
-				tooltip_text += "\n\n" + TTR("Recent inputs:") + "\n" + caps_text;
-			} else {
-				tooltip_text += "\n\n" + TTR("No input events have reached this script yet during this session.");
-			}
-		}
-	}
-	p_row->title_label->set_tooltip_text(tooltip_text);
+	// Determine status from *positive evidence*: a line is considered
+	// "hit" only if the debugger has actually received a sample for it
+	// (count > 0 in `whenline_data`). The earlier design used the absence
+	// of a line in `expected_lines` as a proxy for "hit", which had two
+	// failure modes:
+	//   1. If `get_current_debugger()` returned the wrong debugger (or
+	//      none), `expected_lines` was empty by accident and rows wrongly
+	//      flipped to RAN.
+	//   2. After the engine-side watch's deadline expires and is erased,
+	//      the same empty-expected-lines case occurred and rows lost
+	//      their MISSED state.
+	// Reading `count > 0` from `whenline_data` is direct and survives
+	// both. We scan every available debugger so we don't miss data that
+	// landed on a session other than the currently-focused one.
+	ScriptEditorDebugger *dbg = _find_debugger_for_script(p_row->script_path);
 
-	// Determine current status from the live debugger watch. We re-query
-	// per refresh so the row reflects the freshest data, even when many
-	// `whenline_data_updated` signals fire in quick succession.
-	ScriptEditorDebugger *dbg = EditorDebuggerNode::get_singleton() ? EditorDebuggerNode::get_singleton()->get_current_debugger() : nullptr;
-	HashSet<int> still_unhit;
-	bool deadline_passed = false;
-	if (dbg) {
-		const Dictionary watch = dbg->get_whenline_diff_for_script(p_row->script_path);
-		if (!watch.is_empty()) {
-			const PackedInt32Array expected = watch.get("expected_lines", PackedInt32Array());
-			for (int i = 0; i < expected.size(); i++) {
-				still_unhit.insert(expected[i]);
-			}
-			deadline_passed = watch.get("deadline_passed", false);
-		} else {
-			// The debugger's watch entry is gone (deadline expired and was
-			// erased, or the session restarted). Treat as "deadline passed
-			// with no remaining info" \u2014 the row freezes in place.
-			deadline_passed = true;
-		}
-	}
-
-	// A row's status only depends on *its own* lines: even if other rows
-	// have hits or misses, this row is independent.
 	bool any_unhit = false;
-	for (int i = 0; i < p_row->lines.size(); i++) {
-		if (still_unhit.has(p_row->lines[i])) {
-			any_unhit = true;
-			break;
+	if (dbg) {
+		const Dictionary line_data = dbg->get_whenline_data_for_script(p_row->script_path);
+		for (int i = 0; i < p_row->lines.size(); i++) {
+			const int line = p_row->lines[i];
+			const Dictionary entry = line_data.get(line, Dictionary());
+			const int64_t count = entry.get("count", (int64_t)0);
+			if (count <= 0) {
+				any_unhit = true;
+				break;
+			}
 		}
+	} else {
+		// No debugger we can consult right now; assume nothing has run yet.
+		// We won't flip to RAN without positive evidence, so this is safe.
+		any_unhit = true;
 	}
+
+	const uint64_t now_msec = OS::get_singleton()->get_ticks_msec();
+	const bool deadline_passed = p_row->deadline_msec > 0 && now_msec >= p_row->deadline_msec;
 
 	if (!any_unhit) {
 		p_row->status = ROW_RAN;
@@ -447,23 +515,71 @@ void WhenlineLiveChangesPanel::_refresh_row(RowState *p_row) {
 		p_row->status = ROW_PENDING;
 	}
 
-	// Pick a status string and modulate. Colors are picked from a palette
-	// that reads in both light and dark themes; we deliberately avoid the
-	// editor accent color so the panel doesn't compete with selection UI.
+	// Pick a plain-text status string and modulate. We deliberately avoid
+	// Unicode symbols here — the editor's default font isn't guaranteed to
+	// have glyphs for every emoji, and a missing glyph renders as a square
+	// or empty box that's worse than no symbol at all. Color carries the
+	// urgency.
 	switch (p_row->status) {
 		case ROW_RAN:
-			p_row->status_label->set_text(TTR("\u2713 ran"));
+			p_row->status_label->set_text(TTR("Ran"));
 			p_row->status_label->set_modulate(Color(0.40, 0.80, 0.45));
 			break;
 		case ROW_MISSED:
-			p_row->status_label->set_text(TTR("\u26a0 didn't run"));
+			p_row->status_label->set_text(TTR("Didn't run"));
 			p_row->status_label->set_modulate(Color(1.0, 0.72, 0.15));
 			break;
 		case ROW_PENDING:
 		default:
-			p_row->status_label->set_text(TTR("\u23f3 waiting"));
+			p_row->status_label->set_text(TTR("Waiting"));
 			p_row->status_label->set_modulate(Color(0.7, 0.7, 0.7));
 			break;
+	}
+
+	// Build the hint paragraph. Each bucket gets a tailored
+	// "what-can-you-do-about-this" sentence, plus any captured-context
+	// diagnostic the engine has sent over (currently only input).
+	if (p_row->hint_label) {
+		String hint;
+		switch (p_row->bucket) {
+			case BUCKET_INIT:
+				hint = TTR("This code only runs when an instance is created. Click 'Run anyway' to re-invoke _ready and _enter_tree on every live instance of this script.");
+				break;
+			case BUCKET_PROCESS:
+				hint = TTR("This code is in a per-frame method. Click 'Run anyway' to invoke _process and _physics_process once on every live instance, with the engine's current frame delta.");
+				break;
+			case BUCKET_INPUT:
+				hint = TTR("This code only runs when the user produces input. Reproduce the input in the running game to test it.");
+				break;
+			case BUCKET_OTHER:
+				hint = TTR("This code is only reached when something else calls into it. Trigger the relevant flow in the running game to test it.");
+				break;
+			default:
+				hint = TTR("Reproduce the relevant flow in the running game to test this change.");
+				break;
+		}
+
+		// Append captured-context diagnostics. For input handlers we have
+		// the most recent InputEvent description per method; if any are
+		// available, show them inline so the user has a concrete clue.
+		if (p_row->bucket == BUCKET_INPUT && dbg) {
+			const Dictionary captures = dbg->get_whenline_input_captures_for_script(p_row->script_path);
+			if (!captures.is_empty()) {
+				const Array keys = captures.keys();
+				String caps_text;
+				for (int ki = 0; ki < keys.size(); ki++) {
+					const String method = keys[ki];
+					const String description = captures[keys[ki]];
+					if (!caps_text.is_empty()) {
+						caps_text += "; ";
+					}
+					caps_text += vformat(TTR("%s last triggered by %s"), method, description);
+				}
+				hint += "\n" + caps_text + ".";
+			}
+		}
+
+		p_row->hint_label->set_text(hint);
 	}
 }
 
@@ -539,7 +655,7 @@ void WhenlineLiveChangesPanel::_on_run_anyway(int p_batch_id, int p_row_id) {
 	if (!dbg) {
 		// No active debug session — nothing to send to. Provide visible
 		// feedback by repurposing the status label so the user knows.
-		row->status_label->set_text(TTR("⚠ no debug session"));
+		row->status_label->set_text(TTR("No session"));
 		row->status_label->set_modulate(Color(1.0, 0.72, 0.15));
 		return;
 	}
@@ -551,7 +667,7 @@ void WhenlineLiveChangesPanel::_on_run_anyway(int p_batch_id, int p_row_id) {
 	// outcome arrives via `_on_force_run_result`. We disable the button
 	// briefly to discourage spamming repeated requests; it's re-enabled by
 	// the next refresh.
-	row->status_label->set_text(TTR("⏳ running…"));
+	row->status_label->set_text(TTR("Running..."));
 	row->status_label->set_modulate(Color(0.7, 0.85, 1.0));
 	if (row->run_button) {
 		row->run_button->set_disabled(true);
@@ -573,13 +689,13 @@ void WhenlineLiveChangesPanel::_on_force_run_result(const String &p_script_path,
 				continue;
 			}
 			if (p_errored > 0) {
-				const String summary = vformat(TTR("⚠ ran with %d error(s)%s"),
+				const String summary = vformat(TTR("%d error(s)%s"),
 						p_errored,
 						p_error_text.is_empty() ? String() : String(" (" + p_error_text + ")"));
 				row->status_label->set_text(summary);
 				row->status_label->set_modulate(Color(1.0, 0.45, 0.30));
 			} else {
-				const String summary = vformat(TTR("✓ ran %d call(s)"), p_succeeded);
+				const String summary = vformat(TTR("Ran %d call(s)"), p_succeeded);
 				row->status_label->set_text(summary);
 				row->status_label->set_modulate(Color(0.40, 0.80, 0.45));
 			}
@@ -606,7 +722,7 @@ void WhenlineLiveChangesPanel::_mark_only_first_batch_as_latest() {
 		b->is_latest = is_latest;
 		const String script_label = b->script_path.is_empty() ? String("<built-in>") : b->script_path.get_file();
 		const String when = is_latest ? TTR("Latest reload") : TTR("Earlier reload");
-		b->header_label->set_text(vformat("%s \u2014 %s", when, script_label));
+		b->header_label->set_text(vformat("%s - %s", when, script_label));
 		b->header_label->set_modulate(is_latest ? Color(1, 1, 1, 1) : Color(1, 1, 1, 0.65));
 		b->header_label->set_tooltip_text(b->script_path);
 	}

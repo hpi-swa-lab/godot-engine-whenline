@@ -35,6 +35,7 @@
 class Button;
 class Label;
 class ScrollContainer;
+class Timer;
 class VBoxContainer;
 
 // Bottom-panel UI that journals every reload-diff received during a debugging
@@ -76,10 +77,19 @@ private:
 		int bucket = 0; // GDScriptLanguage::WhenlineReason value.
 		PackedInt32Array lines; // All lines of this group (for display).
 		RowStatus status = ROW_PENDING;
-		// UI handles — owned by the scene tree.
-		HBoxContainer *root = nullptr;
+		// Deadline tracked on the panel side so the row's status survives the
+		// engine-side watch being garbage-collected after expiration. Captured
+		// when the row is created from the diff.
+		uint64_t deadline_msec = 0;
+		// UI handles — owned by the scene tree. Each row is a VBoxContainer
+		// with two children: an HBoxContainer holding the title/status/
+		// buttons, and a Label below it explaining what the user can do.
+		// Keeping the hint visible (rather than only in the tooltip) is the
+		// thing that makes the panel actually actionable.
+		VBoxContainer *root = nullptr;
 		Label *title_label = nullptr;
 		Label *status_label = nullptr;
+		Label *hint_label = nullptr;
 		Button *run_button = nullptr; // Null for buckets we can't force-run.
 		Button *dismiss_button = nullptr;
 	};
@@ -109,6 +119,12 @@ private:
 	int _next_batch_id = 1;
 	int _next_row_id = 1;
 
+	// Drives a once-per-second refresh of every row's status, so deadline
+	// transitions (PENDING → MISSED) happen even when no `whenline_data`
+	// samples are arriving. Without this the panel would freeze on PENDING
+	// forever in idle games.
+	Timer *deadline_tick = nullptr;
+
 	// Connected only while the panel is in the tree, so we can safely
 	// rebuild rows in `_handle_*` even if no debugger session is active.
 	bool _connected_to_debugger = false;
@@ -122,6 +138,13 @@ private:
 	Batch *_find_batch_for_script(const String &p_script_path);
 	Batch *_find_batch_by_id(int p_batch_id);
 	RowState *_find_row_by_id(int p_batch_id, int p_row_id, Batch **r_batch = nullptr);
+	// Walk every active debugger session and return the first one that
+	// has whenline data for the given script. Falls back to the current
+	// debugger when no session knows about the script. Avoids the trap
+	// of `get_current_debugger()` returning the wrong session and making
+	// the panel show a row as "Ran" simply because the wrong tab is
+	// focused.
+	class ScriptEditorDebugger *_find_debugger_for_script(const String &p_script_path) const;
 	void _render_batch_from_watch(Batch *p_batch, const Dictionary &p_watch);
 	void _refresh_all_rows();
 	void _refresh_row(RowState *p_row);
