@@ -241,10 +241,7 @@ class ScriptEditor : public PanelContainer {
 	Tree *disk_changed_list = nullptr;
 	ConfirmationDialog *disk_changed = nullptr;
 
-	// Bottom-panel UI that journals reload-diff changes during a debug
-	// session. Owned by `EditorNode::get_bottom_panel()` once registered.
 	WhenlineLiveChangesPanel *whenline_live_changes_panel = nullptr;
-	Button *whenline_live_changes_panel_button = nullptr;
 
 	bool restoring_layout;
 

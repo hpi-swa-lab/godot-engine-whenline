@@ -56,7 +56,6 @@
 #include "editor/editor_string_names.h"
 #include "editor/file_system/editor_paths.h"
 #include "editor/gui/code_editor.h"
-#include "editor/gui/editor_bottom_panel.h"
 #include "editor/gui/editor_file_dialog.h"
 #include "editor/gui/editor_toaster.h"
 #include "editor/gui/filter_line_edit.h"
@@ -1588,17 +1587,9 @@ void ScriptEditor::_notification(int p_what) {
 
 			EditorFileSystem::get_singleton()->connect("filesystem_changed", callable_mp(this, &ScriptEditor::_filesystem_changed));
 
-			// Register the live-changes bottom panel. Done here (rather than
-			// in the constructor) because the bottom panel only accepts items
-			// once the editor's main UI tree is fully built. The panel itself
-			// owns its content and connects/disconnects to the debugger via
-			// its own NOTIFICATION_ENTER_TREE / EXIT_TREE.
 			if (!whenline_live_changes_panel) {
 				whenline_live_changes_panel = memnew(WhenlineLiveChangesPanel);
-				whenline_live_changes_panel->set_name("LiveChanges");
-				whenline_live_changes_panel_button = EditorNode::get_bottom_panel()->add_item(
-						TTR("Live Changes"),
-						whenline_live_changes_panel);
+				EditorDockManager::get_singleton()->add_dock(whenline_live_changes_panel);
 			}
 #ifdef ANDROID_ENABLED
 			set_process(true);

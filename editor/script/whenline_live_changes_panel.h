@@ -30,13 +30,14 @@
 
 #pragma once
 
-#include "scene/gui/box_container.h"
+#include "editor/docks/editor_dock.h"
 
 class Button;
 class Label;
 class ScrollContainer;
 class Timer;
 class VBoxContainer;
+class HBoxContainer;
 
 // Bottom-panel UI that journals every reload-diff received during a debugging
 // session. Each "batch" is the result of one hot-reload: it contains one row
@@ -52,8 +53,8 @@ class VBoxContainer;
 //                                                        from the watch state
 //   `EditorDebuggerNode::whenline_data_updated`         → refresh existing
 //                                                        batches' run state
-class WhenlineLiveChangesPanel : public VBoxContainer {
-	GDCLASS(WhenlineLiveChangesPanel, VBoxContainer);
+class WhenlineLiveChangesPanel : public EditorDock {
+	GDCLASS(WhenlineLiveChangesPanel, EditorDock);
 
 public:
 	// Status of a single row, derived from the diff watch and the live

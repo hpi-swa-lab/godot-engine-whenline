@@ -34,6 +34,8 @@
 #include "core/os/os.h"
 #include "editor/debugger/editor_debugger_node.h"
 #include "editor/debugger/script_editor_debugger.h"
+#include "editor/docks/editor_dock_manager.h"
+#include "editor/settings/editor_command_palette.h"
 #include "editor/themes/editor_scale.h"
 #include "scene/gui/box_container.h"
 #include "scene/gui/button.h"
@@ -115,13 +117,26 @@ String WhenlineLiveChangesPanel::_format_lines(const PackedInt32Array &p_lines) 
 // =============================================================================
 
 WhenlineLiveChangesPanel::WhenlineLiveChangesPanel() {
-	set_h_size_flags(SIZE_EXPAND_FILL);
-	set_v_size_flags(SIZE_EXPAND_FILL);
+	set_name("Live Changes");
+	set_icon_name("Edit");
+	set_layout_key("WhenlineLiveChanges");
+	set_dock_shortcut(ED_SHORTCUT_AND_COMMAND(
+			"bottom_panels/toggle_whenline_panel",
+			"Toggle Whenline Dock"));
+	set_default_slot(EditorDock::DOCK_SLOT_BOTTOM);
+	set_available_layouts(EditorDock::DOCK_LAYOUT_HORIZONTAL | EditorDock::DOCK_LAYOUT_FLOATING);
+	set_global(false);
+	set_transient(true);
+
+	VBoxContainer *content = memnew(VBoxContainer);
+	content->set_h_size_flags(SIZE_EXPAND_FILL);
+	content->set_v_size_flags(SIZE_EXPAND_FILL);
+	add_child(content);
 
 	scroll = memnew(ScrollContainer);
 	scroll->set_h_size_flags(SIZE_EXPAND_FILL);
 	scroll->set_v_size_flags(SIZE_EXPAND_FILL);
-	add_child(scroll);
+	content->add_child(scroll);
 
 	batches_box = memnew(VBoxContainer);
 	batches_box->set_h_size_flags(SIZE_EXPAND_FILL);
