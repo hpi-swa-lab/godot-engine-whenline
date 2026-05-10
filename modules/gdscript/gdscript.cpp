@@ -55,6 +55,7 @@
 #include "core/core_constants.h"
 #include "core/io/file_access.h"
 
+#include "scene/main/scene_tree.h"
 #include "scene/resources/packed_scene.h"
 #include "scene/scene_string_names.h"
 
@@ -953,6 +954,7 @@ void GDScript::_whenline_emit_reload_diff(const GDScriptParser &p_new_parser) {
 	if (lang) {
 		lang->_whenline_flush();
 		lang->_whenline_flush_influence();
+		lang->_whenline_flush_input_captures();
 	}
 
 	// Re-parse the previously cached source. We deliberately don't run the
@@ -2426,6 +2428,16 @@ void GDScriptLanguage::init() {
 	if (!ProjectSettings::get_singleton()->is_connected("settings_changed", callable_mp_static(&GDScriptParser::update_project_settings))) {
 		ProjectSettings::get_singleton()->connect("settings_changed", callable_mp_static(&GDScriptParser::update_project_settings));
 	}
+
+	// Register the editor → engine "run anyway" message capture if a
+	// debugger is attached. We pass `this` so the static handler can find
+	// the language singleton without a global lookup. Mirrors the pattern
+	// used by `SceneDebugger`.
+	if (EngineDebugger::is_active() && !EngineDebugger::has_capture("gdscript_force_run")) {
+		EngineDebugger::register_message_capture(
+				"gdscript_force_run",
+				EngineDebugger::Capture(this, &GDScriptLanguage::_whenline_parse_force_run_message));
+	}
 #endif // DEBUG_ENABLED
 
 #ifdef TESTS_ENABLED
@@ -2876,6 +2888,9 @@ void GDScriptLanguage::frame() {
 	if (!_whenline_influence_pending.is_empty() && EngineDebugger::is_active()) {
 		_whenline_flush_influence();
 	}
+	if (!_whenline_input_captures_pending.is_empty() && EngineDebugger::is_active()) {
+		_whenline_flush_input_captures();
+	}
 }
 
 GDScriptLanguage::WhenlineReason GDScriptLanguage::_whenline_classify_function_name(const StringName &p_name) {
@@ -2992,6 +3007,7 @@ void GDScriptLanguage::_whenline_clear() {
 	MutexLock lock(mutex);
 	_whenline_pending.clear();
 	_whenline_influence_pending.clear();
+	_whenline_input_captures_pending.clear();
 }
 
 void GDScriptLanguage::_whenline_record_influence(const StringName &p_source, int p_line, const StringName &p_var_name, uint8_t p_reason_mask, const String &p_value) {
@@ -3039,6 +3055,200 @@ void GDScriptLanguage::_whenline_flush_influence() {
 	}
 
 	EngineDebugger::get_singleton()->send_message("gdscript:whenline_influence", payload);
+}
+
+void GDScriptLanguage::_whenline_record_input_capture(const StringName &p_source, const StringName &p_method, const Variant &p_event) {
+	// Build a stable, human-readable one-liner from the event. We do this
+	// at record time (rather than on flush) so the eventual string outlives
+	// any later mutation of the original `InputEvent` object — callers may
+	// pool or reuse the event between dispatches.
+	String description;
+	if (p_event.get_type() == Variant::OBJECT) {
+		Object *obj = p_event;
+		if (obj) {
+			// `as_text()` exists on every InputEvent subclass and produces a
+			// readable label like "Space (Physical)". For non-event objects
+			// (which shouldn't occur for input handlers, but might for any
+			// future capture site), fall back to `get_class()`.
+			if (obj->has_method("as_text")) {
+				description = obj->call("as_text");
+			}
+			if (description.is_empty()) {
+				description = obj->get_class();
+			}
+		}
+	} else {
+		description = p_event.stringify();
+	}
+	if (description.is_empty()) {
+		return;
+	}
+
+	MutexLock lock(mutex);
+	_whenline_input_captures_pending[p_source][p_method] = description;
+}
+
+void GDScriptLanguage::_whenline_flush_input_captures() {
+	HashMap<StringName, HashMap<StringName, String>> to_send;
+	{
+		MutexLock lock(mutex);
+		to_send = std::move(_whenline_input_captures_pending);
+		_whenline_input_captures_pending.clear();
+	}
+
+	if (to_send.is_empty()) {
+		return;
+	}
+
+	// Wire format: flat array of [script_path, num_methods, method_name,
+	//                              description, method_name, description, ...].
+	Array payload;
+	for (const KeyValue<StringName, HashMap<StringName, String>> &script_kv : to_send) {
+		payload.push_back(String(script_kv.key));
+		payload.push_back((int64_t)script_kv.value.size());
+		for (const KeyValue<StringName, String> &method_kv : script_kv.value) {
+			payload.push_back(String(method_kv.key));
+			payload.push_back(method_kv.value);
+		}
+	}
+
+	EngineDebugger::get_singleton()->send_message("gdscript:whenline_input_captures", payload);
+}
+
+Error GDScriptLanguage::_whenline_parse_force_run_message(void *p_user, const String &p_msg, const Array &p_args, bool &r_captured) {
+	GDScriptLanguage *lang = static_cast<GDScriptLanguage *>(p_user);
+	ERR_FAIL_NULL_V(lang, ERR_UNCONFIGURED);
+
+	if (p_msg == "run") {
+		// Wire format: [script_path, bucket]. The bucket value matches the
+		// `WhenlineReason` enum: 1 = init, 2 = process loop. Other buckets
+		// are filtered out on the editor side and shouldn't reach us.
+		ERR_FAIL_COND_V(p_args.size() < 2, ERR_INVALID_DATA);
+		ERR_FAIL_COND_V(p_args[0].get_type() != Variant::STRING, ERR_INVALID_DATA);
+		ERR_FAIL_COND_V(p_args[1].get_type() != Variant::INT, ERR_INVALID_DATA);
+
+		const String script_path = p_args[0];
+		const int bucket = (int)(int64_t)p_args[1];
+		lang->_whenline_force_run(script_path, bucket);
+		r_captured = true;
+		return OK;
+	}
+
+	r_captured = false;
+	return OK;
+}
+
+void GDScriptLanguage::_whenline_force_run(const String &p_script_path, int p_bucket) {
+	// Defer the actual call to the next idle frame so we never run user
+	// code in the middle of a `_process` tick or while the VM holds a
+	// nested call. `MessageQueue::push_callable` is the standard "do this
+	// at a safe time" hook.
+	callable_mp(this, &GDScriptLanguage::_whenline_force_run_dispatch).call_deferred(p_script_path, p_bucket);
+}
+
+void GDScriptLanguage::_whenline_force_run_dispatch(const String &p_script_path, int p_bucket) {
+	// Find the GDScript by path. The editor sends the path the user is
+	// viewing; we look it up in the cache (it must already be loaded for
+	// `instances` to contain anything anyway).
+	Ref<GDScript> script = GDScriptCache::get_cached_script(p_script_path);
+	if (script.is_null()) {
+		return;
+	}
+
+	// Pick the methods to invoke based on the bucket. We restrict the
+	// choice to no-arg lifecycle methods (init bucket) and the standard
+	// loop methods (loop bucket); anything outside this set is left to
+	// future phases per the design notes.
+	LocalVector<StringName> method_names;
+	bool pass_delta = false;
+	switch (p_bucket) {
+		case WHENLINE_REASON_INIT:
+			// Only the no-arg lifecycle methods. `_init` takes constructor
+			// args we haven't captured yet (planned future work), and the
+			// `@implicit_*` methods are compiler-synthesized and not safe
+			// to re-run by name. Everything else here is fair game.
+			method_names.push_back(StringName("_ready"));
+			method_names.push_back(StringName("_enter_tree"));
+			break;
+		case WHENLINE_REASON_PROCESS:
+			method_names.push_back(StringName("_process"));
+			method_names.push_back(StringName("_physics_process"));
+			pass_delta = true;
+			break;
+		default:
+			// Should never reach here — the editor only enables the button
+			// for init and loop buckets.
+			return;
+	}
+
+	// Snapshot the instance set under the language mutex; instances may be
+	// freed during the calls (e.g. user code calls `queue_free`), so we
+	// re-validate each pointer before each call.
+	LocalVector<ObjectID> ids;
+	{
+		MutexLock lock(mutex);
+		ids.reserve(script->instances.size());
+		for (Object *obj : script->instances) {
+			if (obj) {
+				ids.push_back(obj->get_instance_id());
+			}
+		}
+	}
+
+	// Pick a realistic delta for loop methods so user code that divides
+	// through delta doesn't crash. We use the SceneTree's most recent
+	// frame time — that's the actual delta the existing `_process` calls
+	// have been seeing, so user code will behave consistently. Falls back
+	// to a 60-fps frame if no SceneTree is available (shouldn't happen at
+	// runtime but defensive).
+	double delta = 1.0 / 60.0;
+	if (pass_delta && SceneTree::get_singleton()) {
+		delta = SceneTree::get_singleton()->get_process_time();
+		if (delta <= 0.0) {
+			delta = 1.0 / 60.0;
+		}
+	}
+
+	int succeeded = 0;
+	int errored = 0;
+	String error_text;
+	for (ObjectID id : ids) {
+		Object *obj = ObjectDB::get_instance(id);
+		if (!obj) {
+			continue;
+		}
+		for (const StringName &method : method_names) {
+			if (!script->has_method(method)) {
+				continue;
+			}
+			Callable::CallError err;
+			if (pass_delta) {
+				Variant arg = delta;
+				const Variant *argptrs[1] = { &arg };
+				obj->callp(method, argptrs, 1, err);
+			} else {
+				obj->callp(method, nullptr, 0, err);
+			}
+			if (err.error == Callable::CallError::CALL_OK) {
+				succeeded++;
+			} else {
+				errored++;
+				if (error_text.is_empty()) {
+					error_text = vformat("%s.%s: error %d", obj->get_class(), String(method), int(err.error));
+				}
+			}
+		}
+	}
+
+	// Report back to the editor for the toast/log. Schema mirrors the
+	// inbound message: [script_path, bucket, succeeded, errored, error_text].
+	Array payload;
+	payload.push_back(p_script_path);
+	payload.push_back(p_bucket);
+	payload.push_back(succeeded);
+	payload.push_back(errored);
+	payload.push_back(error_text);
+	EngineDebugger::get_singleton()->send_message("gdscript:whenline_force_run_result", payload);
 }
 
 /* EDITOR FUNCTIONS */

@@ -137,6 +137,7 @@ ScriptEditorDebugger *EditorDebuggerNode::_add_debugger() {
 	node->connect("whenline_data_updated", callable_mp(this, &EditorDebuggerNode::_whenline_data_updated).bind(id));
 	node->connect("whenline_reload_diff_received", callable_mp(this, &EditorDebuggerNode::_whenline_reload_diff_received).bind(id));
 	node->connect("whenline_changes_unexecuted", callable_mp(this, &EditorDebuggerNode::_whenline_changes_unexecuted).bind(id));
+	node->connect("whenline_force_run_result", callable_mp(this, &EditorDebuggerNode::_whenline_force_run_result).bind(id));
 
 	if (tabs->get_tab_count() > 0) {
 		get_debugger(0)->clear_style();
@@ -234,6 +235,10 @@ void EditorDebuggerNode::_whenline_changes_unexecuted(const String &p_script_pat
 	emit_signal(SNAME("whenline_changes_unexecuted"), p_script_path, p_unhit_lines, p_debugger);
 }
 
+void EditorDebuggerNode::_whenline_force_run_result(const String &p_script_path, int p_bucket, int p_succeeded, int p_errored, const String &p_error_text, int p_debugger) {
+	emit_signal(SNAME("whenline_force_run_result"), p_script_path, p_bucket, p_succeeded, p_errored, p_error_text, p_debugger);
+}
+
 void EditorDebuggerNode::_bind_methods() {
 	// LiveDebug.
 	ClassDB::bind_method("live_debug_create_node", &EditorDebuggerNode::live_debug_create_node);
@@ -258,6 +263,13 @@ void EditorDebuggerNode::_bind_methods() {
 	ADD_SIGNAL(MethodInfo("whenline_changes_unexecuted",
 			PropertyInfo(Variant::STRING, "script_path"),
 			PropertyInfo(Variant::PACKED_INT32_ARRAY, "unhit_lines"),
+			PropertyInfo(Variant::INT, "debugger")));
+	ADD_SIGNAL(MethodInfo("whenline_force_run_result",
+			PropertyInfo(Variant::STRING, "script_path"),
+			PropertyInfo(Variant::INT, "bucket"),
+			PropertyInfo(Variant::INT, "succeeded"),
+			PropertyInfo(Variant::INT, "errored"),
+			PropertyInfo(Variant::STRING, "error_text"),
 			PropertyInfo(Variant::INT, "debugger")));
 }
 

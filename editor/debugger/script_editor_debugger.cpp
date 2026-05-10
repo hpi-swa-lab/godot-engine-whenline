@@ -1218,6 +1218,7 @@ void ScriptEditorDebugger::_whenline_clear_session_data() {
 	whenline_data.clear();
 	whenline_influence.clear();
 	whenline_diff_watches.clear();
+	whenline_input_captures.clear();
 	emit_signal(SNAME("whenline_data_updated"));
 }
 
@@ -1293,6 +1294,83 @@ Dictionary ScriptEditorDebugger::get_whenline_diff_for_script(const String &p_sc
 	result["line_buckets"] = line_buckets;
 	result["deadline_msec"] = (int64_t)watch.deadline_msec;
 	result["deadline_passed"] = OS::get_singleton()->get_ticks_msec() >= watch.deadline_msec;
+	return result;
+}
+
+void ScriptEditorDebugger::_msg_whenline_input_captures(uint64_t p_thread_id, const Array &p_data) {
+	// Wire format: flat array of [script_path, num_methods, method_name,
+	//                              description, method_name, description, ...]
+	// repeated per script. See `GDScriptLanguage::_whenline_flush_input_captures`.
+	int i = 0;
+	bool changed = false;
+	while (i < p_data.size()) {
+		ERR_FAIL_COND(i + 1 >= p_data.size());
+		ERR_FAIL_COND(p_data[i].get_type() != Variant::STRING);
+		ERR_FAIL_COND(p_data[i + 1].get_type() != Variant::INT);
+
+		const String script_path = p_data[i];
+		const int num_methods = (int)(int64_t)p_data[i + 1];
+		ERR_FAIL_COND(num_methods < 0);
+		i += 2;
+
+		ERR_FAIL_COND(i + num_methods * 2 > p_data.size());
+
+		HashMap<StringName, String> &per_method = whenline_input_captures[script_path];
+		for (int m = 0; m < num_methods; m++) {
+			ERR_FAIL_COND(p_data[i].get_type() != Variant::STRING);
+			ERR_FAIL_COND(p_data[i + 1].get_type() != Variant::STRING);
+			const String method_str = p_data[i];
+			const StringName method_name = StringName(method_str);
+			const String description = p_data[i + 1];
+			i += 2;
+			per_method[method_name] = description;
+			changed = true;
+		}
+	}
+
+	if (changed) {
+		// Reuse the existing data-updated signal so the panel re-renders
+		// rows that reference these captures, without us having to add yet
+		// another targeted signal for what is fundamentally a passive
+		// diagnostic update.
+		emit_signal(SNAME("whenline_data_updated"));
+	}
+}
+
+void ScriptEditorDebugger::_msg_whenline_force_run_result(uint64_t p_thread_id, const Array &p_data) {
+	// Wire format: [script_path, bucket, succeeded, errored, error_text].
+	ERR_FAIL_COND(p_data.size() < 5);
+	ERR_FAIL_COND(p_data[0].get_type() != Variant::STRING);
+	ERR_FAIL_COND(p_data[1].get_type() != Variant::INT);
+	ERR_FAIL_COND(p_data[2].get_type() != Variant::INT);
+	ERR_FAIL_COND(p_data[3].get_type() != Variant::INT);
+	ERR_FAIL_COND(p_data[4].get_type() != Variant::STRING);
+
+	emit_signal(SNAME("whenline_force_run_result"),
+			p_data[0], p_data[1], p_data[2], p_data[3], p_data[4]);
+}
+
+String ScriptEditorDebugger::get_whenline_input_capture(const String &p_script_path, const StringName &p_method_name) const {
+	const HashMap<String, HashMap<StringName, String>>::ConstIterator script_it = whenline_input_captures.find(p_script_path);
+	if (script_it == whenline_input_captures.end()) {
+		return String();
+	}
+	const HashMap<StringName, String>::ConstIterator method_it = script_it->value.find(p_method_name);
+	if (method_it == script_it->value.end()) {
+		return String();
+	}
+	return method_it->value;
+}
+
+Dictionary ScriptEditorDebugger::get_whenline_input_captures_for_script(const String &p_script_path) const {
+	Dictionary result;
+	const HashMap<String, HashMap<StringName, String>>::ConstIterator script_it = whenline_input_captures.find(p_script_path);
+	if (script_it == whenline_input_captures.end()) {
+		return result;
+	}
+	for (const KeyValue<StringName, String> &kv : script_it->value) {
+		result[String(kv.key)] = kv.value;
+	}
 	return result;
 }
 
@@ -1414,6 +1492,8 @@ void ScriptEditorDebugger::_init_parse_message_handlers() {
 	parse_message_handlers["gdscript:whenline_data"] = &ScriptEditorDebugger::_msg_whenline_data;
 	parse_message_handlers["gdscript:whenline_influence"] = &ScriptEditorDebugger::_msg_whenline_influence;
 	parse_message_handlers["gdscript:whenline_diff"] = &ScriptEditorDebugger::_msg_whenline_diff;
+	parse_message_handlers["gdscript:whenline_input_captures"] = &ScriptEditorDebugger::_msg_whenline_input_captures;
+	parse_message_handlers["gdscript:whenline_force_run_result"] = &ScriptEditorDebugger::_msg_whenline_force_run_result;
 }
 
 void ScriptEditorDebugger::_set_reason_text(const String &p_reason, MessageType p_type) {
@@ -2468,6 +2548,15 @@ void ScriptEditorDebugger::_bind_methods() {
 	// path; the live-changes panel uses this as its "new batch" trigger.
 	ADD_SIGNAL(MethodInfo("whenline_reload_diff_received",
 			PropertyInfo(Variant::STRING, "script_path")));
+	// Emitted after the running game finishes a `gdscript_force_run:run`
+	// request. Carries the script path, the bucket, and a summary of how
+	// many calls succeeded / errored along with the first error message.
+	ADD_SIGNAL(MethodInfo("whenline_force_run_result",
+			PropertyInfo(Variant::STRING, "script_path"),
+			PropertyInfo(Variant::INT, "bucket"),
+			PropertyInfo(Variant::INT, "succeeded"),
+			PropertyInfo(Variant::INT, "errored"),
+			PropertyInfo(Variant::STRING, "error_text")));
 	// Emitted ~10 s after a `gdscript:whenline_diff` if any of the changed
 	// lines never executed. Carries the script path and a sorted
 	// `PackedInt32Array` of lines that haven't been seen running.

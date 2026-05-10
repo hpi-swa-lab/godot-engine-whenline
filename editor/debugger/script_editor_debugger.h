@@ -246,6 +246,8 @@ private:
 	void _msg_whenline_data(uint64_t p_thread_id, const Array &p_data);
 	void _msg_whenline_influence(uint64_t p_thread_id, const Array &p_data);
 	void _msg_whenline_diff(uint64_t p_thread_id, const Array &p_data);
+	void _msg_whenline_input_captures(uint64_t p_thread_id, const Array &p_data);
+	void _msg_whenline_force_run_result(uint64_t p_thread_id, const Array &p_data);
 
 	void _parse_message(const String &p_msg, uint64_t p_thread_id, const Array &p_data);
 	void _set_reason_text(const String &p_reason, MessageType p_type);
@@ -323,6 +325,12 @@ private:
 		HashMap<String, WhenlineInfluenceVar> variables; // var_name → per-reason counts
 	};
 	HashMap<String, HashMap<int, WhenlineInfluenceLineData>> whenline_influence;
+
+	// Captured human-readable descriptions of the most recent InputEvent
+	// that reached each input-handler method. Keyed by [script_path][method].
+	// The live-changes panel queries this to populate "last triggered by …"
+	// diagnostic strings on input-bucket rows. Phase 11 surfaces it.
+	HashMap<String, HashMap<StringName, String>> whenline_input_captures;
 
 	// Tracks lines flagged by `gdscript:whenline_diff` (sent after every
 	// successful hot-reload). Each watch records the lines we want to see
@@ -463,6 +471,16 @@ public:
 	// every line was hit in time. Sorted ascending; empty when no watch is
 	// pending for the given script. Used by `_update_whenline_gutters`.
 	PackedInt32Array get_whenline_changed_unhit_lines_for_script(const String &p_script_path) const;
+	// Returns the most recently captured input-event description for the
+	// given (script_path, method_name) pair, or empty if none has been
+	// observed. Used by the live-changes panel to format diagnostic
+	// strings for input-bucket rows.
+	String get_whenline_input_capture(const String &p_script_path, const StringName &p_method_name) const;
+	// Returns every captured (method_name → description) pair for the
+	// given script as a Dictionary keyed by method name (String). Empty
+	// when no input handler in the script has run yet.
+	Dictionary get_whenline_input_captures_for_script(const String &p_script_path) const;
+
 	// Returns the full active reload-diff watch for a script as a
 	// Dictionary, or an empty Dictionary if none is pending. Populated keys:
 	//   "expected_lines":    PackedInt32Array of lines still unhit

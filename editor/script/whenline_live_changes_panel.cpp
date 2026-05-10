@@ -176,6 +176,7 @@ void WhenlineLiveChangesPanel::_connect_debugger_signals() {
 	}
 	debugger->connect("whenline_reload_diff_received", callable_mp(this, &WhenlineLiveChangesPanel::_on_reload_diff_received));
 	debugger->connect("whenline_data_updated", callable_mp(this, &WhenlineLiveChangesPanel::_on_data_updated));
+	debugger->connect("whenline_force_run_result", callable_mp(this, &WhenlineLiveChangesPanel::_on_force_run_result));
 	_connected_to_debugger = true;
 }
 
@@ -190,6 +191,7 @@ void WhenlineLiveChangesPanel::_disconnect_debugger_signals() {
 	}
 	debugger->disconnect("whenline_reload_diff_received", callable_mp(this, &WhenlineLiveChangesPanel::_on_reload_diff_received));
 	debugger->disconnect("whenline_data_updated", callable_mp(this, &WhenlineLiveChangesPanel::_on_data_updated));
+	debugger->disconnect("whenline_force_run_result", callable_mp(this, &WhenlineLiveChangesPanel::_on_force_run_result));
 	_connected_to_debugger = false;
 }
 
@@ -339,9 +341,8 @@ void WhenlineLiveChangesPanel::_render_batch_from_watch(Batch *p_batch, const Di
 		if (_bucket_supports_force_run(row->bucket)) {
 			row->run_button = memnew(Button);
 			row->run_button->set_text(TTR("Run anyway"));
-			row->run_button->set_tooltip_text(TTR("Re-invoke the containing method on every live instance, deferred to the next idle frame."));
-			// TODO(whenline-force-run): wire to engine-side force-run handler in Phase 10.
-			row->run_button->set_disabled(true);
+			row->run_button->set_tooltip_text(TTR("Re-invoke the containing lifecycle method (`_ready`/`_enter_tree` for init, `_process`/`_physics_process` for loop) on every live instance. The call is deferred to the next idle frame so it never interleaves mid-`_process`."));
+			row->run_button->connect(SceneStringName(pressed), callable_mp(this, &WhenlineLiveChangesPanel::_on_run_anyway).bind(p_batch->id, row->id));
 			row->root->add_child(row->run_button);
 		}
 
@@ -376,7 +377,35 @@ void WhenlineLiveChangesPanel::_refresh_row(RowState *p_row) {
 	const String script_basename = p_row->script_path.is_empty() ? String("<built-in>") : p_row->script_path.get_file();
 	const String lines_text = _format_lines(p_row->lines);
 	p_row->title_label->set_text(vformat("%s · %s · lines %s", script_basename, _bucket_label(p_row->bucket), lines_text));
-	p_row->title_label->set_tooltip_text(p_row->script_path);
+
+	// For input-bucket rows, surface the most recent input event seen by
+	// each input handler in the script as a tooltip diagnostic. This
+	// gives the user a concrete reproduction step ("press Space to test")
+	// for code paths that depend on a specific input. Empty for buckets
+	// other than INPUT and when no handler has run yet.
+	String tooltip_text = p_row->script_path;
+	if (p_row->bucket == BUCKET_INPUT) {
+		ScriptEditorDebugger *dbg_for_caps = EditorDebuggerNode::get_singleton() ? EditorDebuggerNode::get_singleton()->get_current_debugger() : nullptr;
+		if (dbg_for_caps) {
+			const Dictionary captures = dbg_for_caps->get_whenline_input_captures_for_script(p_row->script_path);
+			if (!captures.is_empty()) {
+				String caps_text;
+				const Array keys = captures.keys();
+				for (int ki = 0; ki < keys.size(); ki++) {
+					const String method = keys[ki];
+					const String description = captures[keys[ki]];
+					if (!caps_text.is_empty()) {
+						caps_text += "\n";
+					}
+					caps_text += vformat("• %s last triggered by: %s", method, description);
+				}
+				tooltip_text += "\n\n" + TTR("Recent inputs:") + "\n" + caps_text;
+			} else {
+				tooltip_text += "\n\n" + TTR("No input events have reached this script yet during this session.");
+			}
+		}
+	}
+	p_row->title_label->set_tooltip_text(tooltip_text);
 
 	// Determine current status from the live debugger watch. We re-query
 	// per refresh so the row reflects the freshest data, even when many
@@ -493,6 +522,72 @@ void WhenlineLiveChangesPanel::_on_dismiss_batch(int p_batch_id) {
 
 	_mark_only_first_batch_as_latest();
 	_update_empty_state();
+}
+
+void WhenlineLiveChangesPanel::_on_run_anyway(int p_batch_id, int p_row_id) {
+	Batch *batch = nullptr;
+	RowState *row = _find_row_by_id(p_batch_id, p_row_id, &batch);
+	if (!row || !batch) {
+		return;
+	}
+
+	EditorDebuggerNode *debugger_node = EditorDebuggerNode::get_singleton();
+	if (!debugger_node) {
+		return;
+	}
+	ScriptEditorDebugger *dbg = debugger_node->get_current_debugger();
+	if (!dbg) {
+		// No active debug session — nothing to send to. Provide visible
+		// feedback by repurposing the status label so the user knows.
+		row->status_label->set_text(TTR("⚠ no debug session"));
+		row->status_label->set_modulate(Color(1.0, 0.72, 0.15));
+		return;
+	}
+
+	Array msg = { row->script_path, row->bucket };
+	dbg->send_message("gdscript_force_run:run", msg);
+
+	// Optimistically reflect that we just dispatched a request. The actual
+	// outcome arrives via `_on_force_run_result`. We disable the button
+	// briefly to discourage spamming repeated requests; it's re-enabled by
+	// the next refresh.
+	row->status_label->set_text(TTR("⏳ running…"));
+	row->status_label->set_modulate(Color(0.7, 0.85, 1.0));
+	if (row->run_button) {
+		row->run_button->set_disabled(true);
+	}
+}
+
+void WhenlineLiveChangesPanel::_on_force_run_result(const String &p_script_path, int p_bucket, int p_succeeded, int p_errored, const String &p_error_text, int p_debugger) {
+	(void)p_debugger;
+
+	// Find the matching row(s). The result message identifies the script
+	// and bucket but not the originating row id, so we update every row
+	// that matches — in practice there's only one per (script, bucket).
+	for (Batch *batch : batches) {
+		if (batch->script_path != p_script_path) {
+			continue;
+		}
+		for (RowState *row : batch->rows) {
+			if (row->bucket != p_bucket) {
+				continue;
+			}
+			if (p_errored > 0) {
+				const String summary = vformat(TTR("⚠ ran with %d error(s)%s"),
+						p_errored,
+						p_error_text.is_empty() ? String() : String(" (" + p_error_text + ")"));
+				row->status_label->set_text(summary);
+				row->status_label->set_modulate(Color(1.0, 0.45, 0.30));
+			} else {
+				const String summary = vformat(TTR("✓ ran %d call(s)"), p_succeeded);
+				row->status_label->set_text(summary);
+				row->status_label->set_modulate(Color(0.40, 0.80, 0.45));
+			}
+			if (row->run_button) {
+				row->run_button->set_disabled(false);
+			}
+		}
+	}
 }
 
 void WhenlineLiveChangesPanel::_update_empty_state() {

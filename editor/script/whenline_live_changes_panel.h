@@ -128,6 +128,13 @@ private:
 	void _on_dismiss_row(int p_batch_id, int p_row_id);
 	void _on_dismiss_batch(int p_batch_id);
 
+	// Sends a `gdscript_force_run:run` message via the active debugger so
+	// the running game re-invokes the relevant lifecycle method on every
+	// live instance of the script. The result comes back asynchronously
+	// via `whenline_force_run_result`.
+	void _on_run_anyway(int p_batch_id, int p_row_id);
+	void _on_force_run_result(const String &p_script_path, int p_bucket, int p_succeeded, int p_errored, const String &p_error_text, int p_debugger);
+
 	void _update_empty_state();
 	void _mark_only_first_batch_as_latest();
 

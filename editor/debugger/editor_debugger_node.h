@@ -148,6 +148,7 @@ protected:
 	void _whenline_data_updated(int p_debugger);
 	void _whenline_reload_diff_received(const String &p_script_path, int p_debugger);
 	void _whenline_changes_unexecuted(const String &p_script_path, const PackedInt32Array &p_unhit_lines, int p_debugger);
+	void _whenline_force_run_result(const String &p_script_path, int p_bucket, int p_succeeded, int p_errored, const String &p_error_text, int p_debugger);
 
 	void _clear_execution(Ref<RefCounted> p_script) {
 		emit_signal(SNAME("clear_execution"), p_script);

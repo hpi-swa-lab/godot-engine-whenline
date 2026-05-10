@@ -681,6 +681,18 @@ Variant GDScriptFunction::call(GDScriptInstance *p_instance, const Variant **p_a
 	GDScriptLanguage::CallLevel call_level;
 	GDScriptLanguage::get_singleton()->enter_function(&call_level, p_instance, this, stack, &ip, &line);
 
+	// Snapshot the InputEvent argument when an input-handler method is
+	// entered. The live-changes panel uses these captures to tell the user
+	// which input last reached an unhit changed line, e.g. "_input — last
+	// triggered by Space pressed". Cheap (one HashMap insert per call) and
+	// gated on the debugger being active so production runs see no cost.
+	if (p_argcount >= 1 && p_args[0] && EngineDebugger::is_active()) {
+		GDScriptLanguage *lang = GDScriptLanguage::get_singleton();
+		if (lang->_whenline_classify_function_name(name) == GDScriptLanguage::WHENLINE_REASON_INPUT) {
+			lang->_whenline_record_input_capture(source, name, *p_args[0]);
+		}
+	}
+
 #ifdef DEBUG_ENABLED
 #define GD_ERR_BREAK(m_cond) \
 	{ \

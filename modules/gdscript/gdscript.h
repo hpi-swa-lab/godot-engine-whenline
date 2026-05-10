@@ -519,6 +519,29 @@ class GDScriptLanguage : public ScriptLanguage {
 	void _whenline_record_influence(const StringName &p_source, int p_line, const StringName &p_var_name, uint8_t p_reason_mask, const String &p_value);
 	void _whenline_flush_influence();
 
+	// Captured-context tracking. For every method classified as an input
+	// handler (`_input`, `_unhandled_input`, etc.), we snapshot a one-line
+	// description of the InputEvent that triggered the call. The panel uses
+	// this to tell the user which input last reached an unhit changed
+	// line: "_input — last triggered by KEY_SPACE pressed".
+	//
+	// Storage is per-call-overwriting (we only ever care about "the most
+	// recent"), so a flat HashMap keyed by `(script, method)` is enough.
+	// Flushed on the same cadence as `_whenline_pending`.
+	HashMap<StringName, HashMap<StringName, String>> _whenline_input_captures_pending;
+
+	void _whenline_record_input_capture(const StringName &p_source, const StringName &p_method, const Variant &p_event);
+	void _whenline_flush_input_captures();
+
+	// Editor → engine "run anyway" handler. Registered as a debugger
+	// message capture under the "gdscript_force_run" prefix on debug
+	// builds, this dispatches messages like "gdscript_force_run:run" to
+	// `_whenline_force_run` below. The actual call into user code happens
+	// deferred to the next idle frame so we never run mid-`_process`.
+	static Error _whenline_parse_force_run_message(void *p_user, const String &p_msg, const Array &p_args, bool &r_captured);
+	void _whenline_force_run(const String &p_script_path, int p_bucket);
+	void _whenline_force_run_dispatch(const String &p_script_path, int p_bucket);
+
 	HashMap<String, ObjectID> orphan_subclasses;
 
 #ifdef TOOLS_ENABLED
